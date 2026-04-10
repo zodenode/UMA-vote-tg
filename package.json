@@ -1,0 +1,18 @@
+{
+  "name": "uma-vote-tg",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w apps/api && npm run build -w apps/web && npm run build -w apps/bot",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:bot": "npm run dev -w apps/bot",
+    "start:api": "npm run start -w apps/api",
+    "start:bot": "npm run start -w apps/bot"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
