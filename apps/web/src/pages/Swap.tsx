@@ -1,8 +1,21 @@
 import { useState } from "react";
-import { parseEther } from "viem";
+import { formatUnits, parseEther } from "viem";
 import { useAccount, useConnect, useSendTransaction, useWaitForTransactionReceipt } from "wagmi";
 
 const UMA = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828";
+const UMA_DECIMALS = 18;
+
+function formatQuoteError(j: unknown): string {
+  if (!j || typeof j !== "object") return "Quote failed";
+  const o = j as { error?: string; details?: { message?: string; reason?: string; name?: string } };
+  const base = o.error ?? "Quote failed";
+  const d = o.details;
+  if (d && typeof d === "object") {
+    const extra = d.message ?? d.reason ?? d.name;
+    if (extra && extra !== base) return `${base}: ${extra}`;
+  }
+  return base;
+}
 
 export default function Swap() {
   const { address, isConnected } = useAccount();
@@ -45,7 +58,7 @@ export default function Swap() {
       const r = await fetch(`${base}/api/swap/quote?${params.toString()}`);
       const j = await r.json();
       if (!r.ok) {
-        setQuoteErr((j as { error?: string }).error ?? "Quote failed");
+        setQuoteErr(formatQuoteError(j));
         return;
       }
       setQuote((j as { quote: Record<string, unknown> }).quote ?? j);
@@ -65,108 +78,165 @@ export default function Swap() {
       setQuoteErr("Invalid quote payload from 0x.");
       return;
     }
-    sendTransaction({ to, data, value: value ? BigInt(value) : undefined });
+    sendTransaction({
+      to,
+      data,
+      value: value ? BigInt(value) : undefined,
+    });
   }
 
   const buyAmount = quote?.buyAmount as string | undefined;
+  let umaOutDisplay: string | null = null;
+  if (buyAmount) {
+    try {
+      umaOutDisplay = Number(formatUnits(BigInt(buyAmount), UMA_DECIMALS)).toLocaleString(undefined, {
+        maximumFractionDigits: 6,
+      });
+    } catch {
+      umaOutDisplay = buyAmount;
+    }
+  }
+
+  const route = quote?.route as { fills?: { source?: string }[] } | undefined;
+  const routeHint =
+    route?.fills?.length && route.fills[0]?.source
+      ? `via ${route.fills.map((f) => f.source).filter(Boolean).join(" → ")}`
+      : null;
 
   return (
-    <>
-      <h1>Swap to UMA</h1>
-      <p className="muted">
-        <b>Network:</b> Ethereum mainnet. Quotes via 0x. Gas is separate. This MVP does not custody funds.
-      </p>
+    <div className="swap-page">
+      <header className="swap-hero fade-in-up">
+        <div className="swap-hero-glow" aria-hidden />
+        <h1 className="swap-title">Swap to UMA</h1>
+        <p className="muted swap-sub">
+          Ethereum mainnet · 0x routing · You keep custody — we never hold funds.
+        </p>
+      </header>
 
       {!isConnected ? (
-        <div className="card">
-          <p className="muted">Connect an in-browser Ethereum wallet (e.g. MetaMask mobile browser).</p>
+        <div className="card swap-card fade-in-up" style={{ animationDelay: "0.05s" }}>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Connect a wallet to get a quote and swap.
+          </p>
           {connectors.map((c) => (
             <button
               key={c.uid}
               type="button"
-              className="btn btn-primary"
-              style={{ marginBottom: 8 }}
+              className="btn btn-primary btn-press"
+              style={{ marginTop: 12 }}
               disabled={connecting}
               onClick={() => connect({ connector: c })}
             >
-              {c.name}
+              {connecting ? "Connecting…" : c.name}
             </button>
           ))}
         </div>
       ) : (
-        <div className="card">
-          <p className="muted">
-            Connected <code>{address?.slice(0, 6)}…{address?.slice(-4)}</code>
-          </p>
+        <div className="card swap-card swap-connected fade-in-up" style={{ animationDelay: "0.05s" }}>
+          <div className="swap-connected-row">
+            <span className="swap-pulse-dot" aria-hidden />
+            <span className="muted">Connected</span>
+            <code className="swap-address">{address?.slice(0, 6)}…{address?.slice(-4)}</code>
+          </div>
         </div>
       )}
 
-      <div className="card">
-        <label className="muted" htmlFor="eth">
-          Sell ETH amount
+      <div className="card swap-card fade-in-up" style={{ animationDelay: "0.1s" }}>
+        <label className="swap-label" htmlFor="eth">
+          You pay
         </label>
-        <input
-          id="eth"
-          className="field"
-          style={{ marginTop: 8 }}
-          inputMode="decimal"
-          value={ethAmount}
-          onChange={(e) => setEthAmount(e.target.value)}
-        />
+        <div className="swap-input-row">
+          <input
+            id="eth"
+            className="field swap-field"
+            inputMode="decimal"
+            value={ethAmount}
+            onChange={(e) => setEthAmount(e.target.value)}
+            disabled={loading}
+          />
+          <span className="swap-input-suffix">ETH</span>
+        </div>
         <button
           type="button"
-          className="btn btn-secondary"
-          style={{ marginTop: 12 }}
+          className={`btn btn-secondary btn-press${loading ? " btn-loading" : ""}`}
+          style={{ marginTop: 14 }}
           disabled={loading || !isConnected}
           onClick={() => fetchQuote()}
         >
-          {loading ? "Getting quote…" : "Get quote"}
+          {loading ? (
+            <>
+              <span className="btn-spinner" aria-hidden />
+              Fetching quote…
+            </>
+          ) : (
+            "Get quote"
+          )}
         </button>
       </div>
 
-      {quoteErr ? (
-        <div className="card">
-          <p style={{ color: "var(--danger)" }}>{quoteErr}</p>
+      {loading ? (
+        <div className="card swap-card swap-skel fade-in-up" style={{ animationDelay: "0.12s" }}>
+          <div className="skeleton" style={{ width: "40%" }} />
+          <div className="skeleton" style={{ width: "75%" }} />
+          <div className="skeleton" style={{ width: "55%" }} />
         </div>
       ) : null}
 
-      {quote ? (
-        <div className="card">
-          <h2>Quote</h2>
-          {buyAmount ? (
-            <p className="muted">
-              Est. UMA out (raw): <code>{buyAmount}</code>
+      {quoteErr ? (
+        <div
+          className="card swap-card swap-error fade-in-up"
+          style={{ animationDelay: "0.08s" }}
+          role="alert"
+        >
+          <p className="swap-error-title">Quote unavailable</p>
+          <p className="swap-error-msg">{quoteErr}</p>
+        </div>
+      ) : null}
+
+      {quote && !loading ? (
+        <div className="card swap-card swap-quote fade-in-up" style={{ animationDelay: "0.12s" }}>
+          <h2 className="swap-quote-heading">You receive</h2>
+          {umaOutDisplay ? (
+            <p className="swap-uma-amount">
+              <span className="swap-uma-value">{umaOutDisplay}</span>
+              <span className="swap-uma-ticker">UMA</span>
             </p>
-          ) : null}
-          <p className="muted">
-            Integrator fee (if configured) is disclosed by the API as{" "}
-            <code>buyTokenPercentageFee</code> to 0x — see 0x response in network tab for exact bps.
-          </p>
-          <p className="muted">
-            <b>Disclaimer:</b> Slippage and routing can change. You sign the transaction in your wallet.
+          ) : (
+            <p className="muted">Amount in API response — check raw <code>buyAmount</code>.</p>
+          )}
+          {routeHint ? <p className="muted swap-route">{routeHint}</p> : null}
+          <p className="muted swap-disclaimer">
+            Slippage ~1% (API default). Gas is extra. Confirm the full transaction in your wallet.
           </p>
           <button
             type="button"
-            className="btn btn-primary"
-            style={{ marginTop: 12 }}
+            className="btn btn-primary btn-press"
+            style={{ marginTop: 14 }}
             disabled={sending || confirming}
             onClick={execute}
           >
-            {sending || confirming ? "Confirm in wallet…" : "Execute swap"}
+            {sending || confirming ? (
+              <>
+                <span className="btn-spinner light" aria-hidden />
+                Confirm in wallet…
+              </>
+            ) : (
+              "Execute swap"
+            )}
           </button>
           {sendErr ? (
-            <p className="muted" style={{ color: "var(--danger)", marginTop: 8 }}>
+            <p className="muted swap-send-err" style={{ color: "var(--danger)", marginTop: 10 }}>
               {sendErr.message}
             </p>
           ) : null}
           {txHash ? (
-            <p className="muted" style={{ marginTop: 8 }}>
+            <p className="muted" style={{ marginTop: 10, wordBreak: "break-all" }}>
               Tx: <code>{txHash}</code>
               {isSuccess ? " — confirmed" : confirming ? " — confirming…" : ""}
             </p>
           ) : null}
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

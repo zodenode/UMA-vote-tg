@@ -173,3 +173,246 @@ select.field {
   opacity: 0.85;
   border-style: dashed;
 }
+
+/* —— Swap page: motion + app-like polish —— */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.fade-in-up {
+  animation: fade-in-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.swap-page {
+  padding-bottom: var(--space-2);
+}
+
+.swap-hero {
+  position: relative;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.swap-hero-glow {
+  position: absolute;
+  inset: -20% -10% auto;
+  height: 120px;
+  background: radial-gradient(ellipse 70% 80% at 50% 0%, rgba(59, 130, 246, 0.22), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.swap-title {
+  position: relative;
+  z-index: 1;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 var(--space-1);
+}
+
+.swap-sub {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.swap-card {
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.swap-card:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.swap-connected {
+  padding: var(--space-1) var(--space-2);
+}
+
+.swap-connected-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.swap-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.6);
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+.swap-address {
+  font-size: 0.8125rem;
+  color: var(--text);
+  margin-left: auto;
+}
+
+.swap-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.swap-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding-right: var(--space-2);
+}
+
+.swap-field {
+  border: none !important;
+  background: transparent !important;
+  flex: 1;
+  min-width: 0;
+}
+
+.swap-input-suffix {
+  font-weight: 700;
+  font-size: 0.875rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.btn-press:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn-loading {
+  position: relative;
+}
+
+.btn-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  animation: spin 0.65s linear infinite;
+  flex-shrink: 0;
+}
+
+.btn-spinner.light {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+
+.swap-skel .skeleton {
+  margin-bottom: 10px;
+}
+
+.swap-error {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: linear-gradient(145deg, rgba(248, 113, 113, 0.08), var(--surface));
+}
+
+.swap-error-title {
+  margin: 0 0 6px;
+  font-weight: 600;
+  font-size: 0.9375rem;
+  color: var(--danger);
+}
+
+.swap-error-msg {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.swap-quote-heading {
+  margin: 0 0 var(--space-1);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.swap-uma-amount {
+  margin: 0 0 var(--space-1);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.swap-uma-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  background: linear-gradient(120deg, #fff 0%, #93c5fd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.swap-uma-ticker {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.swap-route {
+  margin: 0 0 var(--space-1);
+  font-size: 0.8125rem;
+}
+
+.swap-disclaimer {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in-up {
+    animation: none;
+  }
+  .swap-pulse-dot {
+    animation: none;
+  }
+  .btn-spinner {
+    animation: none;
+  }
+}

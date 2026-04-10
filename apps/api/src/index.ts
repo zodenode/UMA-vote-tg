@@ -17,6 +17,8 @@ import { voterDappDeepLink } from "./disputeClassifier.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
+/** Native ETH placeholder for 0x Swap API v2 */
+const ZEROX_NATIVE_ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as const;
 
 const port = Number(process.env.PORT ?? 8787);
 const dbPath = process.env.DATABASE_PATH ?? "./data/uma-vote.db";
@@ -271,43 +273,67 @@ app.get<{
   if (!zeroXKey) {
     return reply.status(503).send({ error: "ZEROX_API_KEY not configured" });
   }
-  const sellToken = req.query.sellToken ?? WETH_MAINNET;
-  const buyToken = req.query.buyToken ?? UMA_MAINNET;
+  const rawSell = req.query.sellToken ?? "ETH";
+  const sellToken =
+    typeof rawSell === "string" && rawSell.toUpperCase() === "ETH"
+      ? ZEROX_NATIVE_ETH
+      : /^0x[a-fA-F0-9]{40}$/.test(String(rawSell))
+        ? String(rawSell)
+        : WETH_MAINNET;
+  const buyToken =
+    typeof req.query.buyToken === "string" && /^0x[a-fA-F0-9]{40}$/.test(req.query.buyToken)
+      ? req.query.buyToken
+      : UMA_MAINNET;
   const sellAmount = req.query.sellAmount;
   if (!sellAmount) {
     return reply.status(400).send({ error: "sellAmount required (wei)" });
   }
   const taker = req.query.takerAddress ?? "0x0000000000000000000000000000000000000000";
-  const feePct = Math.min(100, Math.max(0, integratorFeeBps)) / 10_000;
   const params = new URLSearchParams({
+    chainId: "1",
     sellToken,
     buyToken,
     sellAmount,
-    takerAddress: taker,
-    slippagePercentage: "0.01",
-    skipValidation: "true",
+    taker,
+    slippageBps: "100",
   });
-  if (feeRecipient && feePct > 0) {
-    params.set("feeRecipient", feeRecipient);
-    params.set("buyTokenPercentageFee", String(feePct));
+  const feeBps = Math.min(100, Math.max(0, Math.round(integratorFeeBps)));
+  if (feeRecipient && feeBps > 0) {
+    params.set("swapFeeRecipient", feeRecipient);
+    params.set("swapFeeBps", String(feeBps));
+    params.set("swapFeeToken", buyToken);
   }
-  const url = `https://api.0x.org/swap/v1/quote?${params.toString()}`;
-  const res = await fetch(url, { headers: { "0x-api-key": zeroXKey } });
+  const url = `https://api.0x.org/swap/allowance-holder/quote?${params.toString()}`;
+  const res = await fetch(url, {
+    headers: {
+      "0x-api-key": zeroXKey,
+      "0x-version": "v2",
+    },
+  });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    return reply.status(502).send({
-      error: (json as { reason?: string }).reason ?? "0x quote failed",
-      details: json,
-    });
+    const j = json as { reason?: string; message?: string; name?: string };
+    const msg = j.message ?? j.reason ?? j.name ?? "0x quote failed";
+    return reply.status(502).send({ error: msg, details: json });
   }
   const j = json as Record<string, unknown>;
+  if (j.liquidityAvailable === false) {
+    return reply.status(502).send({ error: "No liquidity for this swap", details: j });
+  }
+  const tx = j.transaction as { to?: string; data?: string; value?: string } | undefined;
+  const normalized = {
+    ...j,
+    to: tx?.to,
+    data: tx?.data,
+    value: tx?.value,
+  };
   return {
-    quote: j,
+    quote: normalized,
     integratorFeeBps,
     feeRecipient: feeRecipient || null,
     network: "Ethereum mainnet",
     disclosure:
-      "This quote may include an integrator fee shown as buyTokenPercentageFee to the 0x API. You pay Ethereum network gas separately.",
+      "Swap API v2 (AllowanceHolder). Integrator fee uses swapFeeBps on the buy token when configured. You pay Ethereum network gas separately.",
   };
 });
 
