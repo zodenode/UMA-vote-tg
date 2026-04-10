@@ -12,6 +12,7 @@
 #
 # Docs: https://docs.railway.com/guides/deploying-a-monorepo
 #       https://docs.railway.com/guides/config-as-code
+# Human guide: docs/DEPLOY-PRODUCTION.md
 # =============================================================================
 
 metadata:

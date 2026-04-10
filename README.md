@@ -43,66 +43,9 @@ npm run dev:bot    # terminal 3
 
 Set `VITE_API_URL` / `VITE_PUBLIC_BOT_USERNAME` when building the web app so the client can reach the API and build `t.me` referral links.
 
-## Deploy to production (Railway)
+## Deploy to production
 
-This monorepo is intended to run as **three Railway services** from the **same GitHub repo** (API, bot, web). A single human-readable spec lives in **[`deploy/railway.yml`](deploy/railway.yml)**; Railway-native per-service configs are **[`deploy/api.railway.toml`](deploy/api.railway.toml)**, **[`deploy/bot.railway.toml`](deploy/bot.railway.toml)**, and **[`deploy/web.railway.toml`](deploy/web.railway.toml)**.
-
-### 1. Create the project
-
-1. In [Railway](https://railway.app), **New Project** → **Deploy from GitHub** → select this repository.
-2. Add **three services** from the same repo (e.g. “Empty service” three times, each linked to the repo).
-
-### 2. Point each service at config-as-code
-
-For each service, open **Settings → Config-as-code** and set the path:
-
-| Service | Config file           | Root directory |
-| ------- | --------------------- | -------------- |
-| API     | `deploy/api.railway.toml`  | `.`            |
-| Bot     | `deploy/bot.railway.toml`  | `.`            |
-| Web     | `deploy/web.railway.toml`  | `.`            |
-
-Redeploy after saving. Railway merges these with any dashboard overrides (code wins).
-
-### 3. Networking and domains
-
-1. On the **API** service: **Settings → Networking → Generate domain**. Copy the HTTPS URL → set **`API_PUBLIC_URL`** to that value (no trailing slash).
-2. On the **Web** service: generate a domain → set **`WEB_APP_URL`** (used by Telegram and the bot’s Mini App button) to that HTTPS URL.
-3. **Rebuild the web service** whenever you change **`VITE_API_URL`** or **`VITE_PUBLIC_BOT_USERNAME`** (they are baked in at build time).
-
-### 4. Environment variables
-
-Set variables in Railway (**Variables** tab) per service. The full list, with descriptions, is in [`deploy/railway.yml`](deploy/railway.yml). Minimum:
-
-- **API:** `BOT_TOKEN`, `INTERNAL_API_SECRET`, `CRON_SECRET`, `API_PUBLIC_URL`, `THEGRAPH_API_KEY`, `ETH_RPC_URL`, `ZEROX_API_KEY`, `FEE_RECIPIENT`, `DATABASE_PATH` (see below).
-- **Bot:** `BOT_TOKEN`, `WEB_APP_URL`, `API_PUBLIC_URL`, `INTERNAL_API_SECRET`, `CRON_SECRET`, `PUBLIC_BOT_USERNAME` (optional).
-- **Web (build-time):** `VITE_API_URL` (= your API public URL), `VITE_PUBLIC_BOT_USERNAME`.
-
-Use **Reference variables** in Railway to share the same secret across API and bot if you prefer.
-
-### 5. SQLite persistence (API)
-
-The API defaults to a local SQLite file. On Railway, attach a **volume** mounted at **`/data`** and set:
-
-`DATABASE_PATH=/data/uma-vote.db`
-
-Otherwise the database is lost on every redeploy.
-
-### 6. Bot service health check
-
-The bot is a **long-polling worker** with no HTTP server. If Railway fails health checks, open the **bot** service → **Settings → Deploy → Healthcheck** and **disable** the HTTP health check (see note in [`deploy/bot.railway.toml`](deploy/bot.railway.toml)).
-
-### 7. BotFather
-
-Point the Mini App URL to your **`WEB_APP_URL`**. Keep **`WEB_APP_URL`** and **`API_PUBLIC_URL`** on **HTTPS**.
-
-### 8. Railway SSO (teams)
-
-Organization SSO (SAML/OIDC) is configured in the **Railway dashboard** (Team → Security), not in this repo. See [Railway docs](https://docs.railway.com/) for your plan.
-
----
-
-**Alternative (two services):** run API + bot in one container with a process manager (e.g. `concurrently`) and keep web separate; hints are at the bottom of [`deploy/railway.yml`](deploy/railway.yml).
+Step-by-step **Railway** deployment (three services, env vars, volumes, BotFather) is in **[`docs/DEPLOY-PRODUCTION.md`](docs/DEPLOY-PRODUCTION.md)**. Machine-oriented specs: [`deploy/railway.yml`](deploy/railway.yml) and [`deploy/*.railway.toml`](deploy/).
 
 ## GitHub and Cursor Cloud Agent
 
@@ -134,7 +77,7 @@ The Mini App **Account** tab includes a **Discord — coming soon** card: the in
 
 ## Legal / product copy
 
-See [`docs/COPY.md`](docs/COPY.md) for bot/Mini App strings. **Phase 2** on-chain voting UX is described in [`docs/PHASE2.md`](docs/PHASE2.md).
+See [`docs/COPY.md`](docs/COPY.md) for bot/Mini App strings. **Phase 2** on-chain voting UX is described in [`docs/PHASE2.md`](docs/PHASE2.md). **Production deploy:** [`docs/DEPLOY-PRODUCTION.md`](docs/DEPLOY-PRODUCTION.md).
 
 ## Scripts
 
