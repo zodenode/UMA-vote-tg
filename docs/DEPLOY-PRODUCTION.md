@@ -56,13 +56,22 @@ Order matters the first time:
 
 Use **Variables** in the Railway dashboard. For secrets shared between API and bot, use **variable references** so you define `BOT_TOKEN`, `INTERNAL_API_SECRET`, and `CRON_SECRET` once and reference them.
 
+**How to create `INTERNAL_API_SECRET` and `CRON_SECRET`:** Generate two different long random values (never commit them). For example:
+
+```bash
+openssl rand -hex 32   # use for INTERNAL_API_SECRET
+openssl rand -hex 32   # use for CRON_SECRET (must differ)
+```
+
+Paste the first into **both** API and bot as `INTERNAL_API_SECRET`. Paste the second into **both** as `CRON_SECRET`. The API checks the Bearer token on `/api/internal/*` and the `secret` query param on `/api/cron/*`.
+
 ### API service
 
 | Variable | Required | Notes |
 | -------- | -------- | ----- |
-| `BOT_TOKEN` | Yes | Verifies Telegram Mini App `initData`. |
-| `INTERNAL_API_SECRET` | Yes | Bot calls internal routes with `Authorization: Bearer …`. |
-| `CRON_SECRET` | Yes | Protects `/api/cron/*` query endpoints. |
+| `BOT_TOKEN` | Yes | Verifies Telegram Mini App **initData** (HMAC with bot token). |
+| `INTERNAL_API_SECRET` | Yes | Bot sends header **Authorization: Bearer** plus this shared secret on internal POST routes (identical on API and bot). |
+| `CRON_SECRET` | Yes | Shared secret for **?secret=** on **/api/cron/** URLs (bot and any cron caller). |
 | `API_PUBLIC_URL` | Yes | Public HTTPS base URL of this API. |
 | `DATABASE_PATH` | Yes (prod) | Use `/data/uma-vote.db` with a volume (see §5). |
 | `THEGRAPH_API_KEY` | Yes | UMA mainnet voting subgraph via The Graph gateway. |
