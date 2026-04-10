@@ -1,0 +1,20 @@
+# UMA Vote — Telegram Mini App (static Vite build + vite preview)
+# Railway → Service → Settings → Config-as-code path: deploy/web.railway.toml
+# Repo root directory: . (repository root)
+# Set VITE_API_URL and VITE_PUBLIC_BOT_USERNAME on this service before build (Railway → Variables).
+
+[build]
+builder = "RAILPACK"
+buildCommand = "npm ci && npm run build -w apps/web"
+watchPatterns = [
+  "apps/web/**",
+  "package.json",
+  "package-lock.json",
+]
+
+[deploy]
+startCommand = "npm run start:web"
+healthcheckPath = "/"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

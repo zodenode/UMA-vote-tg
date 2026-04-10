@@ -1,0 +1,18 @@
+# UMA Vote — Telegram bot (Grammy, long-polling worker)
+# Railway → Service → Settings → Config-as-code path: deploy/bot.railway.toml
+# Repo root directory: . (repository root)
+# No HTTP server: disable HTTP health check in the Railway dashboard for this service if deploy fails.
+
+[build]
+builder = "RAILPACK"
+buildCommand = "npm ci && npm run build -w apps/bot"
+watchPatterns = [
+  "apps/bot/**",
+  "package.json",
+  "package-lock.json",
+]
+
+[deploy]
+startCommand = "npm run start:bot"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

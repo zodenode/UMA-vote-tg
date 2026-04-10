@@ -1,0 +1,138 @@
+# =============================================================================
+# UMA Vote TG — Railway deployment (single reference file)
+# =============================================================================
+# Railway’s native config-as-code format is TOML or JSON per service:
+#   deploy/api.railway.toml
+#   deploy/bot.railway.toml
+#   deploy/web.railway.toml
+#
+# This YAML is the human-readable “all-in-one” spec: services, commands, env,
+# domains, volumes, and SSO notes. Copy values into the Railway dashboard or
+# point each service at the matching .toml file above.
+#
+# Docs: https://docs.railway.com/guides/deploying-a-monorepo
+#       https://docs.railway.com/guides/config-as-code
+# =============================================================================
+
+metadata:
+  name: uma-vote-tg
+  description: Telegram Mini App + API + bot for UMA voting / disputes (monorepo)
+  repository_root: "."
+
+# -----------------------------------------------------------------------------
+# Railway Team SSO (enterprise)
+# -----------------------------------------------------------------------------
+# SSO is not defined in repo config. Enable in Railway:
+#   Dashboard → Team → Settings → Security → SAML / OIDC (plan-dependent).
+# See: https://docs.railway.com/reference/support#enterprise
+# -----------------------------------------------------------------------------
+
+services:
+  api:
+    summary: Fastify JSON API — subgraph proxy, 0x swap proxy, SQLite, dispute poller
+    railway_config_file: deploy/api.railway.toml
+    root_directory: "."
+    build_command: npm ci && npm run build -w apps/api
+    start_command: npm run start:api
+    healthcheck:
+      path: /health
+      timeout_seconds: 120
+    http_port_env: PORT
+    watch_paths:
+      - apps/api/**
+      - package.json
+      - package-lock.json
+    env_required:
+      # Core
+      PORT: "8787" # Railway injects PORT; default only for local
+      DATABASE_PATH: "/data/uma-vote.db" # use volume mount (see volumes)
+      BOT_TOKEN: "Telegram bot token (also used to verify Mini App initData)"
+      INTERNAL_API_SECRET: "Shared secret; bot sends Bearer token to internal routes"
+      CRON_SECRET: "Query secret for /api/cron/* (bot + digest)"
+      API_PUBLIC_URL: "https://<api-service>.up.railway.app — public base URL for bot fetch()"
+      # Integrations
+      THEGRAPH_API_KEY: "The Graph gateway key for UMA voting subgraph"
+      ETH_RPC_URL: "HTTPS Ethereum JSON-RPC (Alchemy/Infura) for DisputePrice + VotingV2"
+      ZEROX_API_KEY: "0x Swap API key"
+      FEE_RECIPIENT: "EVM address for integrator fee (0x quote)"
+      INTEGRATOR_FEE_BPS: "25"
+      # Optional
+      OO_LOOKBACK_BLOCKS: "4000"
+      DISPUTE_POLL_MS: "12000"
+      POLYMARKET_REQUESTER_ADDRESSES: "comma-separated lowercase addresses"
+      DIGEST_INTERVAL_MS: "3600000"
+      DISPUTE_ALERT_INTERVAL_MS: "45000"
+
+  bot:
+    summary: Grammy Telegram bot — /start, alerts, dispute batches, digest
+    railway_config_file: deploy/bot.railway.toml
+    root_directory: "."
+    build_command: npm ci && npm run build -w apps/bot
+    start_command: npm run start:bot
+    healthcheck:
+      note: "No HTTP listener. In Railway dashboard, disable health checks for this service if deployment fails."
+    watch_paths:
+      - apps/bot/**
+      - package.json
+      - package-lock.json
+    env_required:
+      BOT_TOKEN: "Same bot as API"
+      WEB_APP_URL: "https://<web-service>.up.railway.app — Mini App HTTPS URL for BotFather + web_app buttons"
+      API_PUBLIC_URL: "Same as API service public URL"
+      INTERNAL_API_SECRET: "Same as API"
+      CRON_SECRET: "Same as API"
+      PUBLIC_BOT_USERNAME: "Bot username without @ (optional warning log)"
+      DIGEST_INTERVAL_MS: "3600000"
+      DISPUTE_ALERT_INTERVAL_MS: "45000"
+
+  web:
+    summary: Telegram Mini App (Vite static build served via vite preview)
+    railway_config_file: deploy/web.railway.toml
+    root_directory: "."
+    build_command: npm ci && npm run build -w apps/web
+    start_command: npm run start:web
+    healthcheck:
+      path: /
+      timeout_seconds: 60
+    http_port_env: PORT
+    watch_paths:
+      - apps/web/**
+      - package.json
+      - package-lock.json
+    env_required_build_time:
+      VITE_API_URL: "https://<api-service>.up.railway.app — must be set before build"
+      VITE_PUBLIC_BOT_USERNAME: "Bot username without @ for t.me referral links"
+    env_required_runtime:
+      PORT: "Set automatically by Railway"
+
+# -----------------------------------------------------------------------------
+# Volumes (SQLite persistence)
+# -----------------------------------------------------------------------------
+volumes:
+  - mount_path: /data
+    service: api
+    purpose: >
+      SQLite file at DATABASE_PATH=/data/uma-vote.db survives redeploys.
+      Railway → API service → Volumes → Add volume, mount at /data
+
+# -----------------------------------------------------------------------------
+# Public URLs (after first deploy)
+# -----------------------------------------------------------------------------
+# 1) Generate Railway domains for api + web (Settings → Networking → Generate domain).
+# 2) WEB_APP_URL = web HTTPS URL (required by Telegram Mini App).
+# 3) API_PUBLIC_URL = api HTTPS URL (bot + Mini App fetch).
+# 4) Rebuild **web** after changing VITE_* (build-time embed).
+
+# -----------------------------------------------------------------------------
+# BotFather
+# -----------------------------------------------------------------------------
+# - /setdomain — your bot domain if using login widget (optional).
+# - Bot Settings → Menu Button / Mini App URL → WEB_APP_URL
+
+# -----------------------------------------------------------------------------
+# Optional: two-service layout (API + bot in one process)
+# -----------------------------------------------------------------------------
+# If you prefer one less Railway service, use a process manager, e.g.:
+#   npm install concurrently --save-dev
+#   start: "concurrently -k \"npm run start:api\" \"npm run start:bot\""
+# Create a fourth config or override startCommand; keep web separate for clean static hosting.

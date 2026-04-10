@@ -1,0 +1,19 @@
+# UMA Vote — API service (Fastify + SQLite + pollers)
+# Railway → Service → Settings → Config-as-code path: deploy/api.railway.toml
+# Repo root directory: . (repository root)
+
+[build]
+builder = "RAILPACK"
+buildCommand = "npm ci && npm run build -w apps/api"
+watchPatterns = [
+  "apps/api/**",
+  "package.json",
+  "package-lock.json",
+]
+
+[deploy]
+startCommand = "npm run start:api"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
