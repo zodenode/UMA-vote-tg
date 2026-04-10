@@ -42,8 +42,14 @@ export function openDb(filePath: string) {
     );
     INSERT OR IGNORE INTO oo_poll_cursor (id, last_block) VALUES (1, 0);
 
+    CREATE TABLE IF NOT EXISTS oo_chain_cursor (
+      chain_id TEXT PRIMARY KEY,
+      last_block INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS disputed_queries (
       dispute_key TEXT PRIMARY KEY,
+      chain_id TEXT NOT NULL DEFAULT '1',
       requester TEXT NOT NULL,
       proposer TEXT NOT NULL,
       disputer TEXT NOT NULL,
@@ -66,7 +72,34 @@ export function openDb(filePath: string) {
       sent_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  migrateOoMultiChain(db);
   return db;
+}
+
+/** Legacy DBs: per-chain OO cursor + disputed_queries.chain_id + stable cross-chain dispute_key. */
+function migrateOoMultiChain(db: Database.Database) {
+  const cols = db.prepare(`PRAGMA table_info(disputed_queries)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === "chain_id")) {
+    db.exec(`ALTER TABLE disputed_queries ADD COLUMN chain_id TEXT NOT NULL DEFAULT '1'`);
+  }
+  db.prepare(
+    `UPDATE disputed_queries SET dispute_key = '1:' || dispute_key
+     WHERE dispute_key NOT LIKE '1:%' AND dispute_key NOT LIKE '137:%'`
+  ).run();
+  db.prepare(
+    `UPDATE dispute_alert_sent SET dispute_key = '1:' || dispute_key
+     WHERE dispute_key NOT LIKE '1:%' AND dispute_key NOT LIKE '137:%'`
+  ).run();
+
+  const n = (db.prepare(`SELECT COUNT(*) as c FROM oo_chain_cursor`).get() as { c: number }).c;
+  if (n === 0) {
+    const old = db
+      .prepare(`SELECT last_block FROM oo_poll_cursor WHERE id=1`)
+      .get() as { last_block: number } | undefined;
+    db.prepare(`INSERT INTO oo_chain_cursor (chain_id, last_block) VALUES ('1', ?)`).run(
+      old?.last_block ?? 0
+    );
+  }
 }
 
 export function randomRefCode(): string {

@@ -75,7 +75,9 @@ Paste the first into **both** API and bot as `INTERNAL_API_SECRET`. Paste the se
 | `API_PUBLIC_URL` | Yes | Public HTTPS base URL of this API. |
 | `DATABASE_PATH` | Yes (prod) | Use `/data/uma-vote.db` with a volume (see §5). |
 | `THEGRAPH_API_KEY` | Yes | UMA mainnet voting subgraph via The Graph gateway. |
-| `ETH_RPC_URL` | Yes | HTTPS Ethereum RPC for `DisputePrice` polling + `VotingV2` timing. |
+| `ETH_RPC_URL` | Yes | HTTPS Ethereum RPC for `VotingV2` DVM timing + optional Ethereum OOv2 `DisputePrice` indexing. |
+| `POLYGON_RPC_URL` | Optional | HTTPS Polygon RPC to index Polygon OOv2 `DisputePrice` (e.g. much prediction-market activity). DVM timing still uses Ethereum. |
+| `OO_POLYGON_LOOKBACK_BLOCKS` | Optional | First Polygon poll lookback; defaults to `OO_LOOKBACK_BLOCKS`. |
 | `ZEROX_API_KEY` | Yes | Swap quote proxy. |
 | `FEE_RECIPIENT` | If charging fee | EVM address for 0x integrator fee. |
 | `INTEGRATOR_FEE_BPS` | Optional | Default sensible value in code; e.g. `25`. |
@@ -104,7 +106,7 @@ Paste the first into **both** API and bot as `INTERNAL_API_SECRET`. Paste the se
 | -------- | ---- | ----- |
 | `VITE_API_URL` | **Build** | Must equal public API HTTPS URL. |
 | `VITE_PUBLIC_BOT_USERNAME` | **Build** | Bot username without `@` for `t.me/...` links. |
-| `PORT` | Runtime | Set by Railway for `vite preview`. |
+| `PORT` | **Do not set manually** | Railway injects this at runtime for `vite preview`. Overriding it (e.g. with `8787` from local dev) breaks public routing. |
 
 **Important:** Changing `VITE_*` requires a **new build** of the web service, not only a restart.
 
@@ -178,6 +180,7 @@ To reduce the number of billable services, you can run **API and bot** in one pr
 | DB resets every deploy | No volume or wrong `DATABASE_PATH`. |
 | Bot deploy never healthy | HTTP healthcheck enabled on worker — disable it. |
 | Web hits wrong API | `VITE_API_URL` wrong at **build** time — rebuild web. |
+| **“Application failed to respond”** on the **web** URL | **Wrong `PORT`.** Railway injects `PORT` (often a value like `8080`) and routes traffic to that port. If you set `PORT=8787` (from local `.env.example` / API default), the app listens on `8787` while the proxy hits the injected port → no response. **Fix:** remove any manual `PORT` variable on the **web** service (and usually the **API** service too) so Railway’s value is used. |
 
 ---
 

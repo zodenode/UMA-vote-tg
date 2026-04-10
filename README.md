@@ -18,15 +18,16 @@ Telegram bot + Mini App for **acquiring UMA on Ethereum**, viewing **active DVM 
 
    - `BOT_TOKEN`, `WEB_APP_URL`, `API_PUBLIC_URL`, `INTERNAL_API_SECRET`, `CRON_SECRET`
    - `THEGRAPH_API_KEY` (see [UMA subgraph docs](https://docs.uma.xyz/resources/subgraph-data))
-   - `ETH_RPC_URL` (HTTPS JSON-RPC) for **OptimisticOracleV2 `DisputePrice` log polling** and **VotingV2** commit/reveal countdowns
+   - `ETH_RPC_URL` (HTTPS JSON-RPC) for **VotingV2** commit/reveal countdowns and **Ethereum** OOv2 `DisputePrice` indexing
+   - `POLYGON_RPC_URL` (optional) for **Polygon** OOv2 `DisputePrice` indexing (many markets settle OO on Polygon; DVM timing still uses Ethereum)
    - `ZEROX_API_KEY`, `FEE_RECIPIENT` (for fee disclosure in quotes)
 
 ### Disputes & DVM alignment
 
-- **Detection:** The API watches Ethereum mainnet `0xA0Ae…3FFAe` (OptimisticOracleV2) for **`DisputePrice`** events (escalation to the DVM). This is faster than subgraph lag for “just flipped to disputed”.
+- **Detection:** The API watches **Ethereum** OOv2 (`0xA0Ae…3FFAe`) and, if configured, **Polygon** OOv2 (`0xee3a…7c24`) for **`DisputePrice`** events. This is faster than subgraph lag for “just flipped to disputed”.
 - **Timing:** Reads **`VotingV2`** (`0x004395…34ac`) for `getVotePhase`, `voteTiming.phaseLength`, `getCurrentRoundId`, and `getRoundEndTime` to show **time left in commit** vs **reveal**.
 - **Alerts:** The bot polls `/api/cron/pending-dispute-alerts` and messages subscribers with **“New disputed DVM query — commit/reveal ~Xh left”** (batched, de-duplicated per event).
-- **Filters (Mini App / `GET /api/votes`):** `source` (`polymarket` / `other`), `topic` (`crypto`, `geopolitics`, `sports`, `general`), `minBondWei`.
+- **Filters (Mini App / `GET /api/votes`):** `source` (`polymarket` / `other`), `chain` (`1` Ethereum / `137` Polygon), `topic` (`crypto`, `geopolitics`, `sports`, `general`), `minBondWei`.
 - **Deep links:** Each dispute includes a **`vote.umaproject.org` URL** with `identifier`, `time`, and `ancillary` query params (`umaContext=1`) so users land with context (dApp may ignore unknown params).
 - **`ProposePrice`:** Not indexed in this MVP; only the **disputed** flip is treated as the high-signal event. The same poller pattern can extend to proposals later.
 

@@ -4,46 +4,71 @@ import {
   decodeEventLog,
   http,
   parseAbiItem,
+  type Chain,
   type Hex,
   type PublicClient,
 } from "viem";
-import { mainnet } from "viem/chains";
-import { MAINNET, ooV2Abi } from "./contracts.js";
+import { mainnet, polygon } from "viem/chains";
+import { ooV2Abi } from "./contracts.js";
 import { classifyDispute, voterDappDeepLink } from "./disputeClassifier.js";
 
 const disputePriceAbi = parseAbiItem(
   "event DisputePrice(address indexed requester, address indexed proposer, address indexed disputer, bytes32 identifier, uint256 timestamp, bytes ancillaryData, int256 proposedPrice)"
 );
 
+export function createOoClient(rpcUrl: string, chain: Chain): PublicClient {
+  return createPublicClient({ chain, transport: http(rpcUrl) });
+}
+
 export function createEthClient(rpcUrl: string): PublicClient {
-  return createPublicClient({ chain: mainnet, transport: http(rpcUrl) });
+  return createOoClient(rpcUrl, mainnet);
+}
+
+export function createPolygonOoClient(rpcUrl: string): PublicClient {
+  return createOoClient(rpcUrl, polygon);
+}
+
+export function txExplorerUrl(chainId: string, txHash: string): string {
+  if (chainId === "137") return `https://polygonscan.com/tx/${txHash}`;
+  return `https://etherscan.io/tx/${txHash}`;
 }
 
 export async function pollDisputePriceLogs(
   db: Database.Database,
   client: PublicClient,
+  opts: {
+    chainIdStr: "1" | "137";
+    ooAddress: Hex;
+    lookbackBlocks: bigint;
+  },
   log: { info: (o: object) => void; error: (o: object) => void }
 ): Promise<number> {
-  const cursorRow = db.prepare(`SELECT last_block FROM oo_poll_cursor WHERE id=1`).get() as {
-    last_block: number;
-  };
+  const { chainIdStr, ooAddress, lookbackBlocks } = opts;
+  db.prepare(`INSERT OR IGNORE INTO oo_chain_cursor (chain_id, last_block) VALUES (?, 0)`).run(
+    chainIdStr
+  );
+  const cursorRow = db
+    .prepare(`SELECT last_block FROM oo_chain_cursor WHERE chain_id = ?`)
+    .get(chainIdStr) as { last_block: number };
   let fromBlock = BigInt(cursorRow.last_block);
   const latest = await client.getBlockNumber();
 
   if (fromBlock === 0n) {
-    const lookback = BigInt(process.env.OO_LOOKBACK_BLOCKS ?? "4000");
-    fromBlock = latest > lookback ? latest - lookback : 0n;
+    fromBlock = latest > lookbackBlocks ? latest - lookbackBlocks : 0n;
   } else {
     fromBlock = fromBlock + 1n;
   }
 
   if (fromBlock > latest) {
-    db.prepare(`UPDATE oo_poll_cursor SET last_block = ? WHERE id=1`).run(Number(latest));
+    db.prepare(`UPDATE oo_chain_cursor SET last_block = ? WHERE chain_id = ?`).run(
+      Number(latest),
+      chainIdStr
+    );
     return 0;
   }
 
   const logs = await client.getLogs({
-    address: MAINNET.optimisticOracleV2,
+    address: ooAddress,
     event: disputePriceAbi,
     fromBlock,
     toBlock: latest,
@@ -52,9 +77,9 @@ export async function pollDisputePriceLogs(
   let inserted = 0;
   const insert = db.prepare(`
     INSERT OR IGNORE INTO disputed_queries (
-      dispute_key, requester, proposer, disputer, identifier, timestamp, ancillary_data,
+      dispute_key, chain_id, requester, proposer, disputer, identifier, timestamp, ancillary_data,
       proposed_price, tx_hash, block_number, log_index, bond_wei, total_stake_wei, source_label, topic_tags
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const polySet = new Set(
@@ -80,12 +105,12 @@ export async function pollDisputePriceLogs(
       ancillaryData: Hex;
       proposedPrice: bigint;
     };
-    const eventKey = `${lg.transactionHash!.toLowerCase()}:${lg.logIndex}`;
+    const eventKey = `${chainIdStr}:${lg.transactionHash!.toLowerCase()}:${lg.logIndex}`;
     let bondWei: string | null = null;
     let totalStakeWei: string | null = null;
     try {
       const req = await client.readContract({
-        address: MAINNET.optimisticOracleV2,
+        address: ooAddress,
         abi: ooV2Abi,
         functionName: "getRequest",
         args: [args.requester, args.identifier, args.timestamp, args.ancillaryData],
@@ -106,6 +131,7 @@ export async function pollDisputePriceLogs(
     });
     const result = insert.run(
       eventKey,
+      chainIdStr,
       args.requester.toLowerCase(),
       args.proposer.toLowerCase(),
       args.disputer.toLowerCase(),
@@ -124,14 +150,24 @@ export async function pollDisputePriceLogs(
     if (result.changes > 0) inserted++;
   }
 
-  db.prepare(`UPDATE oo_poll_cursor SET last_block = ? WHERE id=1`).run(Number(latest));
-  if (inserted > 0) log.info({ msg: "DisputePrice logs indexed", inserted, latest: latest.toString() });
+  db.prepare(`UPDATE oo_chain_cursor SET last_block = ? WHERE chain_id = ?`).run(
+    Number(latest),
+    chainIdStr
+  );
+  if (inserted > 0)
+    log.info({
+      msg: "DisputePrice logs indexed",
+      chainId: chainIdStr,
+      inserted,
+      latest: latest.toString(),
+    });
   return inserted;
 }
 
 export function rowToDisputeApi(
   row: {
     dispute_key: string;
+    chain_id?: string | null;
     requester: string;
     proposer: string;
     disputer: string;
@@ -148,11 +184,13 @@ export function rowToDisputeApi(
   },
   dvmRoundId: string | null
 ) {
+  const chainIdStr = row.chain_id ?? "1";
   const ancillaryData = row.ancillary_data as Hex;
   const identifier = row.identifier as Hex;
   const ts = BigInt(row.timestamp);
   return {
     id: row.dispute_key,
+    chainId: Number(chainIdStr),
     requester: row.requester,
     proposer: row.proposer,
     disputer: row.disputer,
@@ -174,6 +212,6 @@ export function rowToDisputeApi(
     })(),
     dvmRoundId,
     voterDappUrl: voterDappDeepLink({ identifier, timestamp: ts, ancillaryData }),
-    etherscanUrl: `https://etherscan.io/tx/${row.tx_hash}`,
+    etherscanUrl: txExplorerUrl(chainIdStr, row.tx_hash),
   };
 }

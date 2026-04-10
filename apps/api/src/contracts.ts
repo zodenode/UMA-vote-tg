@@ -5,6 +5,12 @@ export const MAINNET = {
   votingV2: "0x004395edb43EFca9885CEdad51EC9fAf93Bd34ac" as const,
 };
 
+/** UMA Polygon (chain 137) — packages/core/networks/137.json */
+export const POLYGON = {
+  chainId: 137,
+  optimisticOracleV2: "0xee3afe347d5c74317041e2618c49534daf887c24" as const,
+};
+
 export const votingV2Abi = [
   {
     inputs: [],

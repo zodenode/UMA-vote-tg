@@ -4,7 +4,14 @@ import type { Hex, PublicClient } from "viem";
 import { openDb, getOrCreateUser } from "./db.js";
 import { verifyInitData, parseUserFromInitData } from "./telegramAuth.js";
 import { fetchActivePriceRequests, type PriceRequestSummary } from "./umaSubgraph.js";
-import { createEthClient, pollDisputePriceLogs, rowToDisputeApi } from "./disputePoll.js";
+import {
+  createEthClient,
+  createPolygonOoClient,
+  pollDisputePriceLogs,
+  rowToDisputeApi,
+  txExplorerUrl,
+} from "./disputePoll.js";
+import { MAINNET, POLYGON } from "./contracts.js";
 import { getDvmTiming, type DvmTiming } from "./dvmTiming.js";
 import { voterDappDeepLink } from "./disputeClassifier.js";
 
@@ -21,6 +28,7 @@ const integratorFeeBps = Number(process.env.INTEGRATOR_FEE_BPS ?? "25");
 const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
 const ethRpcUrl = process.env.ETH_RPC_URL ?? "";
+const polygonRpcUrl = process.env.POLYGON_RPC_URL ?? "";
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -31,14 +39,25 @@ let ethClient: PublicClient | null = null;
 if (ethRpcUrl) {
   try {
     ethClient = createEthClient(ethRpcUrl);
-    app.log.info("ETH_RPC_URL set — indexing OptimisticOracleV2 DisputePrice logs");
+    app.log.info("ETH_RPC_URL set — indexing Ethereum OOv2 DisputePrice logs");
   } catch (e) {
     app.log.error(e, "Failed to create Ethereum client");
   }
 }
 
+let polygonOoClient: PublicClient | null = null;
+if (polygonRpcUrl) {
+  try {
+    polygonOoClient = createPolygonOoClient(polygonRpcUrl);
+    app.log.info("POLYGON_RPC_URL set — indexing Polygon OOv2 DisputePrice logs");
+  } catch (e) {
+    app.log.error(e, "Failed to create Polygon client");
+  }
+}
+
 type DisputeRow = {
   dispute_key: string;
+  chain_id?: string | null;
   requester: string;
   proposer: string;
   disputer: string;
@@ -58,11 +77,12 @@ function loadFilteredDisputes(filters: {
   source?: string;
   topic?: string;
   minBondWei?: string;
+  chain?: "1" | "137";
   limit: number;
 }): DisputeRow[] {
   const raw = db
     .prepare(
-      `SELECT * FROM disputed_queries ORDER BY block_number DESC, log_index DESC LIMIT 400`
+      `SELECT * FROM disputed_queries ORDER BY datetime(detected_at) DESC, chain_id, block_number DESC, log_index DESC LIMIT 400`
     )
     .all() as DisputeRow[];
   const src = filters.source?.toLowerCase();
@@ -77,6 +97,10 @@ function loadFilteredDisputes(filters: {
   }
   const out: DisputeRow[] = [];
   for (const r of raw) {
+    if (filters.chain) {
+      const cid = (r.chain_id ?? "1") as "1" | "137";
+      if (cid !== filters.chain) continue;
+    }
     if (src) {
       const lbl = (r.source_label ?? "other").toLowerCase();
       if (src === "polymarket" && lbl !== "polymarket") continue;
@@ -183,7 +207,13 @@ app.post<{ Body: { initData?: string; alertsOn: boolean } }>(
 );
 
 app.get<{
-  Querystring: { source?: string; topic?: string; minBondWei?: string; limit?: string };
+  Querystring: {
+    source?: string;
+    topic?: string;
+    minBondWei?: string;
+    limit?: string;
+    chain?: string;
+  };
 }>(
   "/api/votes",
   async (req): Promise<{
@@ -191,16 +221,21 @@ app.get<{
     disputes: ReturnType<typeof rowToDisputeApi>[];
     dvm: DvmTiming | null;
     rpcConfigured: boolean;
+    polygonOoConfigured: boolean;
     error?: string;
     subgraphError?: string;
   }> => {
     const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 25)));
+    const chainQ = req.query.chain;
+    const chainFilter =
+      chainQ === "1" || chainQ === "137" ? (chainQ as "1" | "137") : undefined;
     const subgraph = await fetchActivePriceRequests(graphKey, 20);
     const dvm = ethClient ? await getDvmTiming(ethClient) : null;
     const rows = loadFilteredDisputes({
       source: req.query.source,
       topic: req.query.topic,
       minBondWei: req.query.minBondWei,
+      chain: chainFilter,
       limit,
     });
     const currentDvmRound = dvm?.roundId ?? null;
@@ -212,6 +247,7 @@ app.get<{
         disputes,
         dvm,
         rpcConfigured: Boolean(ethClient),
+        polygonOoConfigured: Boolean(polygonOoClient),
       };
     }
     return {
@@ -219,6 +255,7 @@ app.get<{
       disputes,
       dvm,
       rpcConfigured: Boolean(ethClient),
+      polygonOoConfigured: Boolean(polygonOoClient),
     };
   }
 );
@@ -370,7 +407,8 @@ app.get<{ Querystring: { secret?: string } }>("/api/cron/pending-dispute-alerts"
       timestamp: BigInt(r.timestamp),
       ancillaryData: r.ancillary_data as Hex,
     });
-    return `${i + 1}. <b>${src}</b> — voter dApp (context link):\n${url}\n   tx: https://etherscan.io/tx/${r.tx_hash}`;
+    const cid = r.chain_id ?? "1";
+    return `${i + 1}. <b>${src}</b> — voter dApp (context link):\n${url}\n   tx: ${txExplorerUrl(cid, r.tx_hash)}`;
   });
   const head =
     dvm != null
@@ -443,9 +481,44 @@ app.get<{ Querystring: { secret?: string } }>("/api/cron/group-stats", async (re
 });
 
 const pollMs = Number(process.env.DISPUTE_POLL_MS ?? 12000);
-if (ethClient) {
-  const tick = () =>
-    pollDisputePriceLogs(db, ethClient!, app.log).catch((e) => app.log.error(e));
+const ethOoLookback = BigInt(process.env.OO_LOOKBACK_BLOCKS ?? "4000");
+const polygonOoLookback = BigInt(
+  process.env.OO_POLYGON_LOOKBACK_BLOCKS ?? process.env.OO_LOOKBACK_BLOCKS ?? "4000"
+);
+
+if (ethClient || polygonOoClient) {
+  const tick = () => {
+    const jobs: Promise<number>[] = [];
+    if (ethClient) {
+      jobs.push(
+        pollDisputePriceLogs(
+          db,
+          ethClient,
+          {
+            chainIdStr: "1",
+            ooAddress: MAINNET.optimisticOracleV2 as Hex,
+            lookbackBlocks: ethOoLookback,
+          },
+          app.log
+        )
+      );
+    }
+    if (polygonOoClient) {
+      jobs.push(
+        pollDisputePriceLogs(
+          db,
+          polygonOoClient,
+          {
+            chainIdStr: "137",
+            ooAddress: POLYGON.optimisticOracleV2 as Hex,
+            lookbackBlocks: polygonOoLookback,
+          },
+          app.log
+        )
+      );
+    }
+    Promise.all(jobs).catch((e) => app.log.error(e));
+  };
   setInterval(tick, pollMs);
   tick();
 }

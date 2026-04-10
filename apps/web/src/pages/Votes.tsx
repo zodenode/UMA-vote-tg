@@ -23,6 +23,7 @@ type DvmTiming = {
 
 type Dispute = {
   id: string;
+  chainId: number;
   identifier: string;
   timestamp: string;
   source: string;
@@ -40,6 +41,7 @@ type VotesPayload = {
   disputes: Dispute[];
   dvm: DvmTiming | null;
   rpcConfigured: boolean;
+  polygonOoConfigured: boolean;
   subgraphError?: string;
 };
 
@@ -54,6 +56,7 @@ function formatDuration(sec: number): string {
 export default function Votes() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [source, setSource] = useState<string>("");
+  const [chain, setChain] = useState<string>("");
   const [topic, setTopic] = useState<string>("");
   const [minBond, setMinBond] = useState<string>("");
 
@@ -61,10 +64,11 @@ export default function Votes() {
     const p = new URLSearchParams();
     p.set("limit", "30");
     if (source) p.set("source", source);
+    if (chain) p.set("chain", chain);
     if (topic) p.set("topic", topic);
     if (minBond.trim()) p.set("minBondWei", minBond.trim());
     return p.toString();
-  }, [source, topic, minBond]);
+  }, [source, chain, topic, minBond]);
 
   const q = useQuery({
     queryKey: ["votes", queryString],
@@ -113,8 +117,9 @@ export default function Votes() {
     <>
       <h1>Votes & disputes</h1>
       <p className="muted">
-        <b>Disputed</b> OO queries are detected from on-chain <code>DisputePrice</code> logs (needs{" "}
-        <code>ETH_RPC_URL</code>). DVM phase timing comes from <code>VotingV2</code> on Ethereum.
+        <b>Disputed</b> OO queries are indexed from <code>DisputePrice</code> logs on Ethereum (
+        <code>ETH_RPC_URL</code>) and optionally Polygon (<code>POLYGON_RPC_URL</code>). DVM commit/reveal timing
+        always comes from <code>VotingV2</code> on Ethereum mainnet — it is not chain-agnostic.
       </p>
 
       <div className="card">
@@ -132,6 +137,20 @@ export default function Votes() {
           <option value="">All</option>
           <option value="polymarket">Polymarket</option>
           <option value="other">Other (exclude Polymarket)</option>
+        </select>
+        <label className="muted" htmlFor="ch" style={{ display: "block", marginTop: 12 }}>
+          OO chain
+        </label>
+        <select
+          id="ch"
+          className="field"
+          style={{ marginTop: 8 }}
+          value={chain}
+          onChange={(e) => setChain(e.target.value)}
+        >
+          <option value="">All</option>
+          <option value="1">Ethereum</option>
+          <option value="137">Polygon</option>
         </select>
         <label className="muted" htmlFor="top" style={{ display: "block", marginTop: 12 }}>
           Topic tag
@@ -189,11 +208,18 @@ export default function Votes() {
         </div>
       )}
 
-      {!data.rpcConfigured ? (
+      {!data.rpcConfigured && !data.polygonOoConfigured ? (
         <div className="card">
           <p className="muted" style={{ color: "var(--danger)" }}>
-            <b>No ETH_RPC_URL</b> — disputed-query detection is off. Subgraph list below may still show DVM price
-            requests.
+            <b>No ETH_RPC_URL or POLYGON_RPC_URL</b> — on-chain disputed-query indexing is off. The subgraph list
+            below may still show DVM price requests.
+          </p>
+        </div>
+      ) : null}
+      {!data.rpcConfigured ? (
+        <div className="card">
+          <p className="muted">
+            <code>ETH_RPC_URL</code> is unset — Ethereum OO disputes and live DVM phase timing are unavailable.
           </p>
         </div>
       ) : null}
@@ -203,7 +229,8 @@ export default function Votes() {
         <div className="card">
           <p className="muted">
             No disputes in the local index yet. After RPC polling runs, new <code>DisputePrice</code> events appear
-            here within ~{data.rpcConfigured ? "one poll interval" : "—"}.
+            here within ~
+            {data.rpcConfigured || data.polygonOoConfigured ? "one poll interval" : "—"}.
           </p>
         </div>
       ) : (
@@ -211,7 +238,10 @@ export default function Votes() {
           <div key={d.id} className="card">
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
               <strong>{d.source}</strong>
-              <span className="badge">{d.topics.join(", ")}</span>
+              <span style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span className="badge">{d.chainId === 137 ? "Polygon OO" : "Ethereum OO"}</span>
+                <span className="badge">{d.topics.join(", ")}</span>
+              </span>
             </div>
             <p className="muted" style={{ marginTop: 8 }}>
               DVM round (current): <b>{d.dvmRoundId ?? "—"}</b>
@@ -239,7 +269,7 @@ export default function Votes() {
               style={{ marginTop: 8 }}
               onClick={() => openVoter(d.etherscanUrl)}
             >
-              Etherscan tx
+              {d.chainId === 137 ? "Polygonscan tx" : "Etherscan tx"}
             </button>
           </div>
         ))

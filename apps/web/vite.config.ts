@@ -9,5 +9,7 @@ export default defineConfig({
     host: true,
     port: Number(process.env.PORT ?? 4173),
     strictPort: true,
+    // Railway (and similar) use dynamic public hostnames; Vite blocks unknown Host headers by default.
+    allowedHosts: true,
   },
 });
