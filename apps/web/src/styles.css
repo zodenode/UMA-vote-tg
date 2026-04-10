@@ -148,7 +148,8 @@ h2 {
   flex-wrap: wrap;
 }
 
-input.field {
+input.field,
+select.field {
   width: 100%;
   min-height: 48px;
   border-radius: var(--radius);

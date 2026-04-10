@@ -12,6 +12,12 @@
 - **Body:** Unresolved DVM price requests are live. (bulleted identifiers). Next: stake → commit → reveal on official dApp.
 - **Buttons:** Open voter dApp | Open Mini App
 
+## Instant dispute batch (high signal)
+
+- **Headline:** New disputed DVM query
+- **Body:** Commit/reveal phase and ~hours left in current phase; numbered lines with source label, deep-link URL to voter dApp (context params), Etherscan tx.
+- **Trigger:** On-chain `DisputePrice` indexed before subgraph catches up (requires `ETH_RPC_URL`).
+
 ## Mini App — swap disclaimer
 
 - Network: Ethereum mainnet. Quotes via 0x. Gas separate. Non-custodial.

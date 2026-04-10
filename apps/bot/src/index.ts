@@ -74,8 +74,8 @@ bot.command("help", async (ctx) => {
       "<b>Commands</b>",
       "/start — menu & Mini App",
       "/help — this message",
-      "/alerts_on — daily digest when votes are active",
-      "/alerts_off — stop digests",
+      "/alerts_on — instant <b>dispute</b> pings + daily digest",
+      "/alerts_off — stop all digests",
       "",
       "<b>Admins (groups)</b>",
       "/pin_vote_alert — short reminder + pin (needs pin permission)",
@@ -217,6 +217,46 @@ bot.command("squad", async (ctx) => {
   );
 });
 
+async function runDisputeBatchAlerts() {
+  if (!cronSecret) return;
+  const r = await fetch(
+    `${apiUrl}/api/cron/pending-dispute-alerts?secret=${encodeURIComponent(cronSecret)}`
+  );
+  if (!r.ok) return;
+  const data = (await r.json()) as {
+    batch: { keys: string[]; html: string } | null;
+  };
+  if (!data.batch?.keys?.length) return;
+  const sub = await fetch(
+    `${apiUrl}/api/cron/alert-subscribers?secret=${encodeURIComponent(cronSecret)}`
+  );
+  if (!sub.ok) return;
+  const { telegramIds } = (await sub.json()) as { telegramIds: string[] };
+  if (!telegramIds?.length) return;
+  const kb = new InlineKeyboard()
+    .url("Open voter dApp", "https://vote.umaproject.org/")
+    .row();
+  if (webAppUrl) kb.webApp("Open Mini App", webAppUrl);
+  for (const id of telegramIds) {
+    try {
+      await bot.api.sendMessage(id, data.batch.html, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+      });
+    } catch (e) {
+      console.error("dispute batch alert failed", id, e);
+    }
+  }
+  await fetch(
+    `${apiUrl}/api/cron/dispute-alerts-mark?secret=${encodeURIComponent(cronSecret)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ keys: data.batch.keys }),
+    }
+  );
+}
+
 async function runDigestOnce() {
   if (!cronSecret) return;
   const r = await fetch(
@@ -255,6 +295,11 @@ async function runDigestOnce() {
     }
   }
 }
+
+const disputeAlertMs = Number(process.env.DISPUTE_ALERT_INTERVAL_MS ?? 45_000);
+setInterval(() => {
+  runDisputeBatchAlerts().catch(console.error);
+}, disputeAlertMs);
 
 const digestMs = Number(process.env.DIGEST_INTERVAL_MS ?? 3_600_000);
 setInterval(() => {

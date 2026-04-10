@@ -35,6 +35,36 @@ export function openDb(filePath: string) {
       telegram_id TEXT PRIMARY KEY,
       last_sent_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS oo_poll_cursor (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_block INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT OR IGNORE INTO oo_poll_cursor (id, last_block) VALUES (1, 0);
+
+    CREATE TABLE IF NOT EXISTS disputed_queries (
+      dispute_key TEXT PRIMARY KEY,
+      requester TEXT NOT NULL,
+      proposer TEXT NOT NULL,
+      disputer TEXT NOT NULL,
+      identifier TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      ancillary_data TEXT NOT NULL,
+      proposed_price TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      block_number INTEGER NOT NULL,
+      log_index INTEGER NOT NULL,
+      detected_at TEXT NOT NULL DEFAULT (datetime('now')),
+      bond_wei TEXT,
+      total_stake_wei TEXT,
+      source_label TEXT,
+      topic_tags TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS dispute_alert_sent (
+      dispute_key TEXT PRIMARY KEY,
+      sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   return db;
 }

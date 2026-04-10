@@ -1,8 +1,12 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import type { Hex, PublicClient } from "viem";
 import { openDb, getOrCreateUser } from "./db.js";
 import { verifyInitData, parseUserFromInitData } from "./telegramAuth.js";
 import { fetchActivePriceRequests, type PriceRequestSummary } from "./umaSubgraph.js";
+import { createEthClient, pollDisputePriceLogs, rowToDisputeApi } from "./disputePoll.js";
+import { getDvmTiming, type DvmTiming } from "./dvmTiming.js";
+import { voterDappDeepLink } from "./disputeClassifier.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
@@ -16,11 +20,86 @@ const feeRecipient = process.env.FEE_RECIPIENT ?? "";
 const integratorFeeBps = Number(process.env.INTEGRATOR_FEE_BPS ?? "25");
 const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
+const ethRpcUrl = process.env.ETH_RPC_URL ?? "";
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const db = openDb(dbPath);
+
+let ethClient: PublicClient | null = null;
+if (ethRpcUrl) {
+  try {
+    ethClient = createEthClient(ethRpcUrl);
+    app.log.info("ETH_RPC_URL set — indexing OptimisticOracleV2 DisputePrice logs");
+  } catch (e) {
+    app.log.error(e, "Failed to create Ethereum client");
+  }
+}
+
+type DisputeRow = {
+  dispute_key: string;
+  requester: string;
+  proposer: string;
+  disputer: string;
+  identifier: string;
+  timestamp: string;
+  ancillary_data: string;
+  proposed_price: string;
+  tx_hash: string;
+  block_number: number;
+  bond_wei: string | null;
+  total_stake_wei: string | null;
+  source_label: string | null;
+  topic_tags: string | null;
+};
+
+function loadFilteredDisputes(filters: {
+  source?: string;
+  topic?: string;
+  minBondWei?: string;
+  limit: number;
+}): DisputeRow[] {
+  const raw = db
+    .prepare(
+      `SELECT * FROM disputed_queries ORDER BY block_number DESC, log_index DESC LIMIT 400`
+    )
+    .all() as DisputeRow[];
+  const src = filters.source?.toLowerCase();
+  const topic = filters.topic?.toLowerCase();
+  let minB: bigint | null = null;
+  if (filters.minBondWei) {
+    try {
+      minB = BigInt(filters.minBondWei);
+    } catch {
+      minB = null;
+    }
+  }
+  const out: DisputeRow[] = [];
+  for (const r of raw) {
+    if (src) {
+      const lbl = (r.source_label ?? "other").toLowerCase();
+      if (src === "polymarket" && lbl !== "polymarket") continue;
+      if (src === "other" && lbl === "polymarket") continue;
+    }
+    if (topic) {
+      let tags: string[] = [];
+      try {
+        tags = JSON.parse(r.topic_tags ?? "[]") as string[];
+      } catch {
+        tags = [];
+      }
+      if (!tags.map((t) => t.toLowerCase()).includes(topic)) continue;
+    }
+    if (minB !== null) {
+      const b = r.bond_wei ? BigInt(r.bond_wei) : 0n;
+      if (b < minB) continue;
+    }
+    out.push(r);
+    if (out.length >= filters.limit) break;
+  }
+  return out;
+}
 
 function requireInternal(req: { headers: Record<string, string | string[] | undefined> }, reply: { status: (n: number) => { send: (b: unknown) => unknown } }) {
   const h = req.headers.authorization;
@@ -103,11 +182,46 @@ app.post<{ Body: { initData?: string; alertsOn: boolean } }>(
   }
 );
 
-app.get("/api/votes", async (): Promise<{ requests: PriceRequestSummary[]; error?: string }> => {
-  const result = await fetchActivePriceRequests(graphKey, 20);
-  if (!result.ok) return { error: result.error, requests: [] };
-  return { requests: result.requests };
-});
+app.get<{
+  Querystring: { source?: string; topic?: string; minBondWei?: string; limit?: string };
+}>(
+  "/api/votes",
+  async (req): Promise<{
+    requests: PriceRequestSummary[];
+    disputes: ReturnType<typeof rowToDisputeApi>[];
+    dvm: DvmTiming | null;
+    rpcConfigured: boolean;
+    error?: string;
+    subgraphError?: string;
+  }> => {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 25)));
+    const subgraph = await fetchActivePriceRequests(graphKey, 20);
+    const dvm = ethClient ? await getDvmTiming(ethClient) : null;
+    const rows = loadFilteredDisputes({
+      source: req.query.source,
+      topic: req.query.topic,
+      minBondWei: req.query.minBondWei,
+      limit,
+    });
+    const currentDvmRound = dvm?.roundId ?? null;
+    const disputes = rows.map((r) => rowToDisputeApi(r, currentDvmRound));
+    if (!subgraph.ok) {
+      return {
+        subgraphError: subgraph.error,
+        requests: [],
+        disputes,
+        dvm,
+        rpcConfigured: Boolean(ethClient),
+      };
+    }
+    return {
+      requests: subgraph.requests,
+      disputes,
+      dvm,
+      rpcConfigured: Boolean(ethClient),
+    };
+  }
+);
 
 app.get<{
   Querystring: {
@@ -227,6 +341,59 @@ function assertCron(req: { query: { secret?: string } }, reply: { status: (n: nu
   return true;
 }
 
+app.get<{ Querystring: { secret?: string } }>("/api/cron/alert-subscribers", async (req, reply) => {
+  if (!assertCron(req, reply)) return;
+  const users = db.prepare(`SELECT telegram_id FROM users WHERE alerts_on = 1`).all() as {
+    telegram_id: string;
+  }[];
+  return { telegramIds: users.map((u) => u.telegram_id) };
+});
+
+app.get<{ Querystring: { secret?: string } }>("/api/cron/pending-dispute-alerts", async (req, reply) => {
+  if (!assertCron(req, reply)) return;
+  const dvm = ethClient ? await getDvmTiming(ethClient) : null;
+  const pending = db
+    .prepare(
+      `SELECT * FROM disputed_queries
+       WHERE dispute_key NOT IN (SELECT dispute_key FROM dispute_alert_sent)
+       ORDER BY block_number ASC, log_index ASC LIMIT 8`
+    )
+    .all() as DisputeRow[];
+  if (pending.length === 0) return { batch: null as null, dvm };
+  const keys = pending.map((r) => r.dispute_key);
+  const phaseLabel = dvm?.phase === "commit" ? "commit" : "reveal";
+  const hrs = dvm ? dvm.hoursLeftInPhase.toFixed(1) : "?";
+  const lines = pending.map((r, i) => {
+    const src = r.source_label ?? "Other";
+    const url = voterDappDeepLink({
+      identifier: r.identifier as Hex,
+      timestamp: BigInt(r.timestamp),
+      ancillaryData: r.ancillary_data as Hex,
+    });
+    return `${i + 1}. <b>${src}</b> — voter dApp (context link):\n${url}\n   tx: https://etherscan.io/tx/${r.tx_hash}`;
+  });
+  const head =
+    dvm != null
+      ? `<b>New disputed DVM query</b>\n${phaseLabel} phase: ~<b>${hrs}h</b> left in this phase.\nCommit/reveal alternate every <b>${(dvm.phaseLengthSec / 3600).toFixed(1)}h</b>.\n`
+      : `<b>New disputed DVM query</b>\nConfigure <code>ETH_RPC_URL</code> for live phase timing.\n`;
+  const batch = {
+    keys,
+    html: `${head}\n${lines.join("\n")}\n\n<i>Escalated via OptimisticOracleV2 DisputePrice → DVM.</i>`,
+  };
+  return { batch, dvm };
+});
+
+app.post<{
+  Querystring: { secret?: string };
+  Body: { keys?: string[] };
+}>("/api/cron/dispute-alerts-mark", async (req, reply) => {
+  if (!assertCron(req, reply)) return;
+  const keys = req.body?.keys ?? [];
+  const ins = db.prepare(`INSERT OR IGNORE INTO dispute_alert_sent (dispute_key) VALUES (?)`);
+  for (const k of keys) ins.run(k);
+  return { ok: true, marked: keys.length };
+});
+
 app.get<{ Querystring: { secret?: string } }>("/api/cron/digest-recipients", async (req, reply) => {
   if (!assertCron(req, reply)) return;
   const result = await fetchActivePriceRequests(graphKey, 3);
@@ -274,6 +441,14 @@ app.get<{ Querystring: { secret?: string } }>("/api/cron/group-stats", async (re
   }[];
   return { groups: rows };
 });
+
+const pollMs = Number(process.env.DISPUTE_POLL_MS ?? 12000);
+if (ethClient) {
+  const tick = () =>
+    pollDisputePriceLogs(db, ethClient!, app.log).catch((e) => app.log.error(e));
+  setInterval(tick, pollMs);
+  tick();
+}
 
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {
   app.log.error(err);
