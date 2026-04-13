@@ -5,6 +5,7 @@ import { WagmiProvider } from "wagmi";
 import { BrowserRouter } from "react-router-dom";
 import { wagmiConfig } from "./wagmi";
 import App from "./App";
+import "./tailwind.css";
 import "./styles.css";
 
 const qc = new QueryClient();

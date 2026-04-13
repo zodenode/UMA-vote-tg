@@ -15,6 +15,7 @@ This guide deploys the **UMA Vote Telegram** monorepo as **three Railway service
 - GitHub repo connected to [Railway](https://railway.app).
 - Telegram **bot token** from [@BotFather](https://t.me/BotFather).
 - Third-party keys: **The Graph** (UMA voting subgraph), **Ethereum JSON-RPC** (e.g. Alchemy/Infura), **0x** swap API, and an EVM address for **`FEE_RECIPIENT`** if you charge an integrator fee.
+- Optional **custodial vault**: **`VAULT_MASTER_KEY`** on the API (32-byte secret) so users can commit/reveal via the bot/Mini App without a browser wallet; this is **custodial** — treat like hot-wallet ops (see README).
 
 ---
 
@@ -75,12 +76,15 @@ Paste the first into **both** API and bot as `INTERNAL_API_SECRET`. Paste the se
 | `API_PUBLIC_URL` | Yes | Public HTTPS base URL of this API. |
 | `DATABASE_PATH` | Yes (prod) | Use `/data/uma-vote.db` with a volume (see §5). |
 | `THEGRAPH_API_KEY` | Yes | UMA mainnet voting subgraph via The Graph gateway. |
+| `THEGRAPH_GATEWAY_BASE` | No | Defaults to `https://gateway-arbitrum.network.thegraph.com/api` (decentralized network). Use `https://gateway.thegraph.com/api` only if your key/subgraph still requires the legacy host. |
+| `VOTING_SUBGRAPH_ID` | No | Defaults to UMA’s published mainnet voting Subgraph ID; override if Studio shows a new id. |
 | `ETH_RPC_URL` | Yes | HTTPS Ethereum RPC for `VotingV2` DVM timing + optional Ethereum OOv2 `DisputePrice` indexing. |
 | `POLYGON_RPC_URL` | Optional | HTTPS Polygon RPC to index Polygon OOv2 `DisputePrice` (e.g. much prediction-market activity). DVM timing still uses Ethereum. |
 | `OO_POLYGON_LOOKBACK_BLOCKS` | Optional | First Polygon poll lookback; defaults to `OO_LOOKBACK_BLOCKS`. |
 | `ZEROX_API_KEY` | Yes | Swap quote proxy. |
-| `FEE_RECIPIENT` | If charging fee | EVM address for 0x integrator fee. |
-| `INTEGRATOR_FEE_BPS` | Optional | Default sensible value in code; e.g. `25`. |
+| `FEE_RECIPIENT` | If charging a fee (`INTEGRATOR_FEE_BPS` > 0) | EVM address for 0x integrator fee. |
+| `INTEGRATOR_FEE_BPS` | Optional | Default **50** (0.5% on buy side via 0x). Set `0` to disable. |
+| `VAULT_MASTER_KEY` | Optional | 32-byte key (`openssl rand -hex 32` or base64). Enables per-user encrypted custodial wallets + `/api/vault/*`. **API only** — never in web build or bot env. |
 | `PORT` | No | Railway sets automatically; local default is `8787`. |
 | `OO_LOOKBACK_BLOCKS` | Optional | First poll lookback (default `4000`). |
 | `DISPUTE_POLL_MS` | Optional | Dispute log poll interval (default `12000`). |
@@ -106,9 +110,15 @@ Paste the first into **both** API and bot as `INTERNAL_API_SECRET`. Paste the se
 | -------- | ---- | ----- |
 | `VITE_API_URL` | **Build** | Must equal public API HTTPS URL. |
 | `VITE_PUBLIC_BOT_USERNAME` | **Build** | Bot username without `@` for `t.me/...` links. |
+| `VITE_MAINNET_RPC_URL` | **Build** (recommended) | HTTPS Ethereum JSON-RPC for Mini App reads (`VotingV2`, stakes, request status). Improves reliability vs the public default. |
+| `VITE_WALLETCONNECT_PROJECT_ID` | **Build** (recommended) | [Reown / WalletConnect Cloud](https://cloud.reown.com/) project id so users without an injected wallet (typical in Telegram) can connect via WalletConnect. |
 | `PORT` | **Do not set manually** | Railway injects this at runtime for `vite preview`. Overriding it (e.g. with `8787` from local dev) breaks public routing. |
 
 **Important:** Changing `VITE_*` requires a **new build** of the web service, not only a restart.
+
+### Vault master key rotation (optional)
+
+Rotating **`VAULT_MASTER_KEY`** without losing user wallets requires a **one-off re-encryption** job: decrypt each `user_vaults.enc_private_key` with the old master, re-encrypt with the new master, update rows. If you skip migration, a new master makes old ciphertext unreadable — users must create new vaults (destructive). Never put **`VAULT_MASTER_KEY`** on the web or bot services.
 
 ---
 
@@ -153,7 +163,7 @@ Details: comment in [`deploy/bot.railway.toml`](../deploy/bot.railway.toml).
 
 - `GET {API_PUBLIC_URL}/health` → `{ "ok": true }`.
 - Open **`WEB_APP_URL`** in a browser — Mini App loads; **Votes** / **Swap** call the API.
-- In Telegram, open the bot → **Open Mini App** → same checks.
+- In Telegram, open the bot → **Open Mini App** → same checks. Use **Vote in Mini App** to land on the Votes tab when `start_param` / `startapp=vote` is passed through.
 - Toggle **alerts** in the Mini App and confirm the bot receives updates (API + secrets must match).
 
 ---
@@ -176,10 +186,15 @@ To reduce the number of billable services, you can run **API and bot** in one pr
 | ------- | ------------ |
 | Mini App “session could not be verified” | `BOT_TOKEN` mismatch between Telegram and API, or wrong `API_PUBLIC_URL` / CORS. |
 | Empty votes / disputes | Missing `THEGRAPH_API_KEY` or `ETH_RPC_URL` on API. |
+| Red **Subgraph: subgraph not found** (id shown) | Usually wrong gateway host for decentralized subgraphs. Ensure default `THEGRAPH_GATEWAY_BASE` (Arbitrum network gateway) or set `VOTING_SUBGRAPH_ID` to the current id from [The Graph Studio](https://thegraph.com/studio/) / [UMA subgraph docs](https://docs.umaproject.org/resources/subgraph-data). |
 | Swap errors | Missing or invalid `ZEROX_API_KEY` / `FEE_RECIPIENT`. |
 | DB resets every deploy | No volume or wrong `DATABASE_PATH`. |
 | Bot deploy never healthy | HTTP healthcheck enabled on worker — disable it. |
 | Web hits wrong API | `VITE_API_URL` wrong at **build** time — rebuild web. |
+| Mini App cannot connect a wallet in Telegram | Set **`VITE_WALLETCONNECT_PROJECT_ID`** and rebuild web; injected MetaMask is often unavailable inside Telegram WebView. |
+| Vault create/commit 503 | Set **`VAULT_MASTER_KEY`** on the API; commit/reveal also need **`ETH_RPC_URL`**. |
+| Vault “No vault for user” | User must **Create vault** in the Mini App or run **`/wallet create`** in the bot first. |
+| Voting reads fail or time out | Set **`VITE_MAINNET_RPC_URL`** to a dedicated provider (Alchemy/Infura) and rebuild. |
 | **“Application failed to respond”** on the **web** URL | **Wrong `PORT`.** Railway injects `PORT` (often a value like `8080`) and routes traffic to that port. If you set `PORT=8787` (from local `.env.example` / API default), the app listens on `8787` while the proxy hits the injected port → no response. **Fix:** remove any manual `PORT` variable on the **web** service (and usually the **API** service too) so Railway’s value is used. |
 
 ---

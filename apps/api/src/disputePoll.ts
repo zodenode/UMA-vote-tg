@@ -16,8 +16,16 @@ const disputePriceAbi = parseAbiItem(
   "event DisputePrice(address indexed requester, address indexed proposer, address indexed disputer, bytes32 identifier, uint256 timestamp, bytes ancillaryData, int256 proposedPrice)"
 );
 
+/** viem `http()` transport requires http(s): — not ws(s):. Many providers use the same host for both. */
+export function toHttpRpcUrl(rpcUrl: string): string {
+  const t = rpcUrl.trim();
+  if (t.startsWith("wss://")) return `https://${t.slice(6)}`;
+  if (t.startsWith("ws://")) return `http://${t.slice(5)}`;
+  return t;
+}
+
 export function createOoClient(rpcUrl: string, chain: Chain): PublicClient {
-  return createPublicClient({ chain, transport: http(rpcUrl) });
+  return createPublicClient({ chain, transport: http(toHttpRpcUrl(rpcUrl)) });
 }
 
 export function createEthClient(rpcUrl: string): PublicClient {

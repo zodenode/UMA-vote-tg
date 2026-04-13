@@ -1,4 +1,5 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, type Context } from "grammy";
+import { encodeVoteFocusToken } from "./voteFocusToken.js";
 
 const token = process.env.BOT_TOKEN;
 if (!token) {
@@ -14,15 +15,81 @@ const botUsername = process.env.PUBLIC_BOT_USERNAME ?? "";
 
 const bot = new Bot(token);
 
+/** Pass-through start param for Mini App (Telegram passes as start_param / tgWebAppStartParam when supported). */
+function webAppUrlWithStartParam(base: string, startapp: string): string {
+  const b = base.replace(/\/$/, "");
+  const join = b.includes("?") ? "&" : "?";
+  return `${b}${join}startapp=${encodeURIComponent(startapp)}`;
+}
+
 function mainKeyboard() {
   const kb = new InlineKeyboard();
   if (webAppUrl) {
     kb.webApp("Open Mini App", webAppUrl).row();
+    kb.webApp("Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
   }
+  kb.text("Vote from bot", "vote_list").row();
+  kb.text("Vault (custody)", "vault_menu").row();
   kb.text("Alerts: On", "alerts_on").text("Alerts: Off", "alerts_off").row();
   kb.url("Open voter dApp", "https://vote.umaproject.org/").row();
   kb.text("Help", "help");
   return kb;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+type DisputeRow = { id: string; source: string; chainId: number };
+
+async function replyVotePicker(ctx: Context) {
+  if (!webAppUrl) {
+    await ctx.reply("Mini App URL is not configured (set WEB_APP_URL on the bot).");
+    return;
+  }
+  const res = await fetch(`${apiUrl}/api/votes?limit=8`);
+  if (!res.ok) {
+    await ctx.reply("Could not load disputes from the API. Check API_PUBLIC_URL and the API service.");
+    return;
+  }
+  const data = (await res.json()) as { disputes?: DisputeRow[] };
+  const disputes = data.disputes ?? [];
+  if (disputes.length === 0) {
+    await ctx.reply(
+      [
+        "<b>uma.vote</b>",
+        "No <b>disputed</b> queries in the index yet.",
+        "",
+        "Open the Mini App for the full DVM list (including subgraph requests).",
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < disputes.length; i++) {
+    const d = disputes[i]!;
+    const token = encodeVoteFocusToken(d.id);
+    const startapp = `vote_${token}`;
+    if (startapp.length > 512) continue;
+    const label = `${i + 1}. ${d.source} · ${d.chainId === 137 ? "Poly" : "ETH"}`.slice(0, 64);
+    kb.webApp(label, webAppUrlWithStartParam(webAppUrl, startapp)).row();
+  }
+  kb.webApp("All votes & swap", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  const lines = disputes.map(
+    (d, i) => `${i + 1}. ${escapeHtml(d.source)} · chain ${d.chainId}`
+  );
+  await ctx.reply(
+    [
+      "<b>Vote from the bot</b>",
+      "Each button opens the <b>Mini App</b> on that dispute — connect your wallet there to commit/reveal on Ethereum.",
+      "",
+      ...lines.map((l) => `• ${l}`),
+      "",
+      "<i>On-chain signing happens in the Web App (WalletConnect or browser wallet), not inside this chat.</i>",
+    ].join("\n"),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
 }
 
 function parseRefFromStart(text: string | undefined): string | null {
@@ -44,6 +111,94 @@ async function internalJson(path: string, body: unknown) {
   });
 }
 
+async function internalGet(path: string) {
+  return fetch(`${apiUrl}${path}`, {
+    headers: { authorization: `Bearer ${internalSecret}` },
+  });
+}
+
+type WizardPayload = {
+  votePick?: { keys: string[]; proposedPrices: (string | null)[] };
+  revealPick?: { keys: string[] };
+};
+
+async function saveWizardSession(telegramId: string, state: string, payload: WizardPayload) {
+  await internalJson("/api/internal/vote-wizard/save", {
+    telegramId,
+    state,
+    payloadJson: JSON.stringify(payload),
+  });
+}
+
+async function loadWizardSession(
+  telegramId: string
+): Promise<{ state: string; payload: WizardPayload } | null> {
+  const r = await internalGet(
+    `/api/internal/vote-wizard/load?telegramId=${encodeURIComponent(telegramId)}`
+  );
+  if (!r.ok) return null;
+  const j = (await r.json()) as { session: { state: string; payload_json: string } | null };
+  if (!j.session) return null;
+  let payload: WizardPayload = {};
+  try {
+    payload = JSON.parse(j.session.payload_json) as WizardPayload;
+  } catch {
+    payload = {};
+  }
+  return { state: j.session.state, payload };
+}
+
+/** Private-chat users waiting to send a custom vote price (wei string). */
+const vaultCustomPriceWait = new Map<string, { disputeKey: string }>();
+
+const WEI_1E18 = "1000000000000000000";
+
+type ApiPmOutcome = { label: string; mid: string | null; priceBuy: string | null; priceSell: string | null };
+type ApiPm = {
+  title: string | null;
+  url: string | null;
+  outcomes: ApiPmOutcome[];
+  proposedPriceHint: string | null;
+} | null;
+
+type ApiDispute = {
+  id: string;
+  source: string;
+  chainId: number;
+  proposedPrice?: string | null;
+  polymarket: ApiPm;
+};
+
+function pmSummary(pm: ApiPm): string {
+  if (!pm) return "";
+  const title = pm.title ? escapeHtml(pm.title.slice(0, 80)) : "";
+  const prices =
+    pm.outcomes?.length > 0
+      ? pm.outcomes
+          .map((o) => {
+            const p = o.mid ?? o.priceBuy ?? o.priceSell ?? "—";
+            return `${escapeHtml(o.label.slice(0, 24))}: ${escapeHtml(p)}`;
+          })
+          .join(" · ")
+      : "";
+  const hint =
+    pm.proposedPriceHint != null && pm.proposedPriceHint !== ""
+      ? `OO proposed ≈ ${escapeHtml(pm.proposedPriceHint)}`
+      : "";
+  const bits = [title && `<i>${title}</i>`, prices && `<small>${prices}</small>`, hint && `<small>${hint}</small>`].filter(
+    Boolean
+  );
+  return bits.length ? `\n${bits.join("\n")}` : "";
+}
+
+async function ensureInternal(ctx: Context): Promise<boolean> {
+  if (!internalSecret) {
+    await ctx.reply("Server misconfigured: set INTERNAL_API_SECRET on bot and API.");
+    return false;
+  }
+  return true;
+}
+
 bot.command("start", async (ctx) => {
   const ref = parseRefFromStart(ctx.message?.text);
   const uid = String(ctx.from?.id ?? "");
@@ -56,11 +211,11 @@ bot.command("start", async (ctx) => {
   }
   await ctx.reply(
     [
-      "<b>UMA Vote</b>",
+      "<b>uma.vote</b>",
       "",
-      "Get <b>UMA</b> on Ethereum, see active DVM rounds, and jump to the official voter dApp.",
+      "Swap into <b>UMA</b>, track DVM rounds, and <b>vote</b> (Mini App + wallet). Use <code>/votes</code> for per-dispute buttons.",
       "",
-      "<b>Two taps:</b> open the Mini App, then turn vote alerts on or off.",
+      "<b>Tip:</b> open the Mini App or tap <b>Vote from bot</b> below.",
       "",
       "<i>Not affiliated with the UMA Foundation — see docs.uma.xyz</i>",
     ].join("\n"),
@@ -68,11 +223,19 @@ bot.command("start", async (ctx) => {
   );
 });
 
+bot.command("votes", async (ctx) => {
+  await replyVotePicker(ctx);
+});
+
 bot.command("help", async (ctx) => {
   await ctx.reply(
     [
       "<b>Commands</b>",
       "/start — menu & Mini App",
+      "/votes — disputed queries + Web App buttons to vote",
+      "/wallet — custodial vault (create / export-once / status)",
+      "/vote — commit via vault wizard (API-signed)",
+      "/reveal — reveal a pending vault commit",
       "/help — this message",
       "/alerts_on — instant <b>dispute</b> pings + daily digest",
       "/alerts_off — stop all digests",
@@ -80,6 +243,9 @@ bot.command("help", async (ctx) => {
       "<b>Admins (groups)</b>",
       "/pin_vote_alert — short reminder + pin (needs pin permission)",
       "/squad — opted-in member count for this group",
+      "",
+      "<b>Custody</b>",
+      "Vault keys are encrypted on the server; the operator can sign allowed txs. Not a hardware wallet.",
       "",
       "<b>Coming soon</b>",
       "Discord login — connect Discord to auto-post vote reminders in your server.",
@@ -140,9 +306,14 @@ bot.callbackQuery("alerts_off", async (ctx) => {
 bot.callbackQuery("help", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply(
-    "Use /help for full commands. Mini App: Swap, Votes, Referrals, Discord (coming soon).",
+    "Use /help for full commands. Mini App: Swap, Votes, Account. Try /votes to vote via Web App buttons.",
     { reply_markup: mainKeyboard() }
   );
+});
+
+bot.callbackQuery("vote_list", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await replyVotePicker(ctx);
 });
 
 bot.command("pin_vote_alert", async (ctx) => {
@@ -167,7 +338,10 @@ bot.command("pin_vote_alert", async (ctx) => {
   const kb = new InlineKeyboard()
     .url("Open voter dApp", "https://vote.umaproject.org/")
     .row();
-  if (webAppUrl) kb.webApp("Open UMA Vote Mini App", webAppUrl);
+  if (webAppUrl) {
+    kb.webApp("Open uma.vote Mini App", webAppUrl).row();
+    kb.webApp("Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  }
   const msg = await ctx.reply(
     [
       "<b>UMA DVM vote window</b>",
@@ -215,6 +389,402 @@ bot.command("squad", async (ctx) => {
     ].join("\n"),
     { parse_mode: "HTML" }
   );
+});
+
+async function replyVaultStatus(ctx: Context, uid: string) {
+  const r = await internalGet(`/api/internal/vault/status?telegramId=${encodeURIComponent(uid)}`);
+  if (!r.ok) {
+    await ctx.reply("Could not load vault status. Is the API running?");
+    return;
+  }
+  const st = (await r.json()) as {
+    vaultEnabled: boolean;
+    address: string | null;
+    exportedOnce: boolean;
+  };
+  const lines = [
+    "<b>Custodial vault</b>",
+    "",
+    st.address
+      ? `Address:\n<code>${escapeHtml(st.address)}</code>`
+      : "<i>No vault yet.</i> Tap <b>Create</b> or use <code>/wallet create</code>.",
+    "",
+    st.vaultEnabled
+      ? "<i>Signing (commit/reveal) is available.</i>"
+      : "<b>Signing disabled</b> — API needs <code>VAULT_MASTER_KEY</code> and <code>ETH_RPC_URL</code>.",
+    "",
+    st.exportedOnce
+      ? "<i>Private key was exported once — cannot export again.</i>"
+      : st.address
+        ? "You may <b>export</b> the raw key once (high risk)."
+        : "",
+    "",
+    "<b>Custody warning:</b> the operator can sign txs this product allows; DB + master key compromise drains the wallet. Fund gas + stake UMA on the vault address to vote.",
+  ];
+  const kb = new InlineKeyboard();
+  if (!st.address) kb.text("Create vault", "vault_create").row();
+  else {
+    kb.text("Refresh", "vault_menu").row();
+    if (!st.exportedOnce) kb.text("Export key (once)", "vault_export").row();
+  }
+  kb.text("Vote wizard", "vote_vault_start").text("Reveal", "reveal_vault_start").row();
+  await ctx.reply(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
+}
+
+bot.callbackQuery("vault_menu", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  await replyVaultStatus(ctx, uid);
+});
+
+bot.callbackQuery("vault_create", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  const r = await internalJson("/api/internal/vault/create", { telegramId: uid });
+  if (!r.ok) {
+    const t = await r.text();
+    await ctx.reply(`Create failed: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+    return;
+  }
+  const j = (await r.json()) as { address: string; created: boolean };
+  await ctx.reply(
+    j.created
+      ? `<b>Vault created.</b>\n<code>${escapeHtml(j.address)}</code>\n\nFund ETH for gas and stake UMA on this address for DVM weight.`
+      : `<b>Vault already exists.</b>\n<code>${escapeHtml(j.address)}</code>`,
+    { parse_mode: "HTML" }
+  );
+});
+
+bot.callbackQuery("vault_export", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  const r = await internalJson("/api/internal/vault/export", { telegramId: uid });
+  if (!r.ok) {
+    const t = await r.text();
+    await ctx.reply(`Export failed: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+    return;
+  }
+  const j = (await r.json()) as { privateKey: string };
+  await ctx.reply(
+    [
+      "<b>Private key (shown once)</b>",
+      "",
+      `<code>${escapeHtml(j.privateKey)}</code>`,
+      "",
+      "<b>Delete this message</b> after copying. Anyone with the key controls the wallet.",
+    ].join("\n"),
+    { parse_mode: "HTML" }
+  );
+});
+
+bot.command("wallet", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  await internalJson("/api/internal/ensure-user", {
+    telegramId: uid,
+    username: ctx.from?.username,
+    ref: null,
+  }).catch(() => {});
+  const parts = ctx.message?.text?.trim().split(/\s+/) ?? [];
+  const sub = parts[1]?.toLowerCase();
+  if (sub === "create") {
+    const r = await internalJson("/api/internal/vault/create", { telegramId: uid });
+    if (!r.ok) {
+      await ctx.reply("Could not create vault.");
+      return;
+    }
+    const j = (await r.json()) as { address: string; created: boolean };
+    await ctx.reply(
+      j.created
+        ? `Vault created:\n${j.address}\n\nFund ETH + stake UMA on this address.`
+        : `Vault already exists:\n${j.address}`
+    );
+    return;
+  }
+  if (sub === "export") {
+    const r = await internalJson("/api/internal/vault/export", { telegramId: uid });
+    if (!r.ok) {
+      const t = await r.text();
+      await ctx.reply(`Export failed: ${t}`);
+      return;
+    }
+    const j = (await r.json()) as { privateKey: string };
+    await ctx.reply(
+      [
+        "<b>Private key (one-time)</b>",
+        `<code>${escapeHtml(j.privateKey)}</code>`,
+        "Delete this chat message after saving the key offline.",
+      ].join("\n\n"),
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  await replyVaultStatus(ctx, uid);
+});
+
+async function startVoteWizard(ctx: Context, uid: string) {
+  const res = await fetch(`${apiUrl}/api/votes?limit=8`);
+  if (!res.ok) {
+    await ctx.reply("Could not load disputes from the API.");
+    return;
+  }
+  const data = (await res.json()) as { disputes?: ApiDispute[]; dvm?: { phase: string } | null };
+  const disputes = data.disputes ?? [];
+  if (disputes.length === 0) {
+    await ctx.reply("No disputed queries in the index. Try again after the API indexes new disputes.");
+    return;
+  }
+  const keys = disputes.map((d) => d.id);
+  const proposedPrices = disputes.map((d) => d.proposedPrice ?? null);
+  await saveWizardSession(uid, "vote_pick", { votePick: { keys, proposedPrices } });
+  const phaseNote = data.dvm?.phase ? `DVM phase: <b>${escapeHtml(data.dvm.phase)}</b>` : "";
+  const lines = disputes.map((d, i) => {
+    const chain = d.chainId === 137 ? "Poly" : "ETH";
+    const head = `${i + 1}. ${escapeHtml(d.source)} · ${chain}`;
+    return `${head}${pmSummary(d.polymarket)}`;
+  });
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < disputes.length; i++) {
+    kb.text(String(i + 1), `vw:${i}`).row();
+  }
+  kb.text("Cancel", "vw_cancel").row();
+  await ctx.reply(
+    [
+      "<b>Vote with vault</b>",
+      phaseNote,
+      "",
+      "Pick a dispute. Commit uses your <b>custodial</b> wallet on the API (not your browser wallet).",
+      "",
+      ...lines,
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+}
+
+bot.command("vote", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  await internalJson("/api/internal/ensure-user", { telegramId: uid, username: ctx.from?.username, ref: null }).catch(
+    () => {}
+  );
+  await startVoteWizard(ctx, uid);
+});
+
+bot.callbackQuery("vote_vault_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  await startVoteWizard(ctx, uid);
+});
+
+bot.callbackQuery("vw_cancel", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (uid) await saveWizardSession(uid, "idle", {});
+  await ctx.reply("Vote wizard cancelled.");
+});
+
+bot.callbackQuery(/^vw:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  const idx = Number(ctx.match![1]);
+  const sess = await loadWizardSession(uid);
+  const pick = sess?.payload.votePick;
+  if (!pick || sess?.state !== "vote_pick" || idx < 0 || idx >= pick.keys.length) {
+    await ctx.reply("Session expired — run /vote again.");
+    return;
+  }
+  const disputeKey = pick.keys[idx]!;
+  const proposed = pick.proposedPrices[idx] ?? null;
+  await saveWizardSession(uid, "vote_price", {
+    votePick: { keys: [disputeKey], proposedPrices: [proposed] },
+  });
+  const kb = new InlineKeyboard()
+    .text("Proposed OO price", "vwpr:prop")
+    .row()
+    .text("0 (wei)", "vwpr:0")
+    .text("1e18", "vwpr:1e18")
+    .row()
+    .text("Custom (reply)", "vwpr:custom")
+    .row()
+    .text("Cancel", "vw_cancel");
+  const propLine =
+    proposed != null && proposed !== ""
+      ? `Proposed: <code>${escapeHtml(proposed)}</code>`
+      : "No proposed price on file — use custom.";
+  await ctx.reply(
+    [
+      "<b>Choose vote price</b> (int256, wei)",
+      propLine,
+      "",
+      "Or tap <b>Custom</b> and send a single integer in this chat.",
+    ].join("\n\n"),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^vwpr:(prop|0|1e18|custom)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  const kind = ctx.match![1];
+  const sess = await loadWizardSession(uid);
+  const pick = sess?.payload.votePick;
+  if (!pick || sess?.state !== "vote_price" || pick.keys.length !== 1) {
+    await ctx.reply("Session expired — run /vote again.");
+    return;
+  }
+  const disputeKey = pick.keys[0]!;
+  const proposed = pick.proposedPrices[0] ?? null;
+  let priceStr: string | null = null;
+  if (kind === "prop") {
+    if (proposed == null || proposed === "") {
+      await ctx.reply("No proposed price for this dispute. Use Custom and send the wei integer.");
+      return;
+    }
+    priceStr = proposed.trim();
+  } else if (kind === "0") priceStr = "0";
+  else if (kind === "1e18") priceStr = WEI_1E18;
+  else {
+    vaultCustomPriceWait.set(uid, { disputeKey });
+    await ctx.reply("Send one message with the price as a decimal integer (wei), e.g. 1000000000000000000");
+    return;
+  }
+  const r = await internalJson("/api/internal/vault/vote/commit", {
+    telegramId: uid,
+    disputeKey,
+    price: priceStr,
+  });
+  await saveWizardSession(uid, "idle", {});
+  if (!r.ok) {
+    const t = await r.text();
+    await ctx.reply(`Commit failed: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+    return;
+  }
+  const j = (await r.json()) as { txHash: string };
+  await ctx.reply(
+    `<b>Commit sent.</b>\n<code>${escapeHtml(j.txHash)}</code>\n\nUse <code>/reveal</code> during the reveal phase.`,
+    { parse_mode: "HTML" }
+  );
+});
+
+async function startRevealFlow(ctx: Context, uid: string) {
+  const r = await internalGet(
+    `/api/internal/vault/pending-commits?telegramId=${encodeURIComponent(uid)}`
+  );
+  if (!r.ok) {
+    await ctx.reply("Could not load pending commits.");
+    return;
+  }
+  const j = (await r.json()) as { pending: { disputeKey: string; roundId: string; commitTxHash: string }[] };
+  const pending = j.pending ?? [];
+  if (pending.length === 0) {
+    await ctx.reply("No unrevealed vault commits on file for your account.");
+    return;
+  }
+  const keys = pending.map((p) => p.disputeKey);
+  await saveWizardSession(uid, "reveal_pick", { revealPick: { keys } });
+  const lines = pending.map((p, i) => {
+    const short = p.disputeKey.length > 20 ? `${p.disputeKey.slice(0, 10)}…${p.disputeKey.slice(-6)}` : p.disputeKey;
+    return `${i + 1}. <code>${escapeHtml(short)}</code> · round ${escapeHtml(p.roundId)}`;
+  });
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < pending.length; i++) kb.text(`Reveal ${i + 1}`, `vr:${i}`).row();
+  kb.text("Cancel", "vw_cancel").row();
+  await ctx.reply(
+    ["<b>Reveal with vault</b>", "", ...lines, "", "Pick which commit to reveal (reveal phase only)."].join("\n"),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+}
+
+bot.command("reveal", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  await internalJson("/api/internal/ensure-user", { telegramId: uid, username: ctx.from?.username, ref: null }).catch(
+    () => {}
+  );
+  await startRevealFlow(ctx, uid);
+});
+
+bot.callbackQuery("reveal_vault_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  await startRevealFlow(ctx, uid);
+});
+
+bot.callbackQuery(/^vr:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  const idx = Number(ctx.match![1]);
+  const sess = await loadWizardSession(uid);
+  const pick = sess?.payload.revealPick;
+  if (!pick || sess?.state !== "reveal_pick" || idx < 0 || idx >= pick.keys.length) {
+    await ctx.reply("Session expired — run /reveal again.");
+    return;
+  }
+  const disputeKey = pick.keys[idx]!;
+  const r = await internalJson("/api/internal/vault/vote/reveal", { telegramId: uid, disputeKey });
+  await saveWizardSession(uid, "idle", {});
+  if (!r.ok) {
+    const t = await r.text();
+    await ctx.reply(`Reveal failed: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+    return;
+  }
+  const j = (await r.json()) as { txHash: string };
+  await ctx.reply(`<b>Reveal sent.</b>\n<code>${escapeHtml(j.txHash)}</code>`, { parse_mode: "HTML" });
+});
+
+bot.on("message:text", async (ctx, next) => {
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid || ctx.chat?.type !== "private") return next();
+  const wait = vaultCustomPriceWait.get(uid);
+  if (!wait) return next();
+  const text = ctx.message.text.trim();
+  if (text.startsWith("/")) {
+    return next();
+  }
+  vaultCustomPriceWait.delete(uid);
+  if (!(await ensureInternal(ctx))) return;
+  let priceStr: string;
+  try {
+    void BigInt(text);
+    priceStr = text;
+  } catch {
+    await ctx.reply("Invalid integer. Run /vote and choose Custom again.");
+    return;
+  }
+  const r = await internalJson("/api/internal/vault/vote/commit", {
+    telegramId: uid,
+    disputeKey: wait.disputeKey,
+    price: priceStr,
+  });
+  await saveWizardSession(uid, "idle", {});
+  if (!r.ok) {
+    const t = await r.text();
+    await ctx.reply(`Commit failed: ${t}`);
+    return;
+  }
+  const j = (await r.json()) as { txHash: string };
+  await ctx.reply(`Commit sent.\n${j.txHash}\n\nUse /reveal in the reveal phase.`);
 });
 
 async function runDisputeBatchAlerts() {

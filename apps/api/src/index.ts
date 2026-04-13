@@ -14,6 +14,15 @@ import {
 import { MAINNET, POLYGON } from "./contracts.js";
 import { getDvmTiming, type DvmTiming } from "./dvmTiming.js";
 import { voterDappDeepLink } from "./disputeClassifier.js";
+import { parseVaultMasterKey, encryptPrivateKey, decryptPrivateKey } from "./vaultCrypto.js";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import {
+  createVaultForUser,
+  custodialCommitVote,
+  custodialRevealVote,
+  getVault,
+} from "./custodialVoting.js";
+import { enrichDisputesForApi, type PolymarketEnrichment } from "./polymarketEnrichment.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
@@ -26,7 +35,7 @@ const botToken = process.env.BOT_TOKEN ?? "";
 const graphKey = process.env.THEGRAPH_API_KEY;
 const zeroXKey = process.env.ZEROX_API_KEY;
 const feeRecipient = process.env.FEE_RECIPIENT ?? "";
-const integratorFeeBps = Number(process.env.INTEGRATOR_FEE_BPS ?? "25");
+const integratorFeeBps = Number(process.env.INTEGRATOR_FEE_BPS ?? "50");
 const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
 const ethRpcUrl = process.env.ETH_RPC_URL ?? "";
@@ -55,6 +64,28 @@ if (polygonRpcUrl) {
   } catch (e) {
     app.log.error(e, "Failed to create Polygon client");
   }
+}
+
+let vaultMasterKey: Buffer | null = null;
+try {
+  if (process.env.VAULT_MASTER_KEY?.trim()) {
+    vaultMasterKey = parseVaultMasterKey(process.env.VAULT_MASTER_KEY);
+    app.log.info("VAULT_MASTER_KEY loaded — custodial vault enabled");
+  } else {
+    app.log.warn("VAULT_MASTER_KEY unset — custodial vault routes disabled");
+  }
+} catch (e) {
+  app.log.error(e, "Invalid VAULT_MASTER_KEY");
+  vaultMasterKey = null;
+}
+
+const vaultRateLast = new Map<string, number>();
+function vaultRateOk(telegramId: string, minGapMs: number): boolean {
+  const t = Date.now();
+  const prev = vaultRateLast.get(telegramId) ?? 0;
+  if (t - prev < minGapMs) return false;
+  vaultRateLast.set(telegramId, t);
+  return true;
 }
 
 type DisputeRow = {
@@ -125,6 +156,12 @@ function loadFilteredDisputes(filters: {
     if (out.length >= filters.limit) break;
   }
   return out;
+}
+
+function loadDisputeRowByKey(disputeKey: string): DisputeRow | undefined {
+  return db.prepare(`SELECT * FROM disputed_queries WHERE dispute_key = ?`).get(disputeKey) as
+    | DisputeRow
+    | undefined;
 }
 
 function requireInternal(req: { headers: Record<string, string | string[] | undefined> }, reply: { status: (n: number) => { send: (b: unknown) => unknown } }) {
@@ -216,16 +253,17 @@ app.get<{
     limit?: string;
     chain?: string;
   };
-}>(
+  }>(
   "/api/votes",
   async (req): Promise<{
     requests: PriceRequestSummary[];
-    disputes: ReturnType<typeof rowToDisputeApi>[];
+    disputes: (ReturnType<typeof rowToDisputeApi> & { polymarket: PolymarketEnrichment | null })[];
     dvm: DvmTiming | null;
     rpcConfigured: boolean;
     polygonOoConfigured: boolean;
     error?: string;
     subgraphError?: string;
+    vaultEnabled: boolean;
   }> => {
     const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 25)));
     const chainQ = req.query.chain;
@@ -241,7 +279,11 @@ app.get<{
       limit,
     });
     const currentDvmRound = dvm?.roundId ?? null;
-    const disputes = rows.map((r) => rowToDisputeApi(r, currentDvmRound));
+    const pmMap = await enrichDisputesForApi(rows, 15);
+    const disputes = rows.map((r) => ({
+      ...rowToDisputeApi(r, currentDvmRound),
+      polymarket: pmMap.get(r.dispute_key) ?? null,
+    }));
     if (!subgraph.ok) {
       return {
         subgraphError: subgraph.error,
@@ -250,6 +292,7 @@ app.get<{
         dvm,
         rpcConfigured: Boolean(ethClient),
         polygonOoConfigured: Boolean(polygonOoClient),
+        vaultEnabled: Boolean(vaultMasterKey && ethClient && ethRpcUrl),
       };
     }
     return {
@@ -258,6 +301,7 @@ app.get<{
       dvm,
       rpcConfigured: Boolean(ethClient),
       polygonOoConfigured: Boolean(polygonOoClient),
+      vaultEnabled: Boolean(vaultMasterKey && ethClient && ethRpcUrl),
     };
   }
 );
@@ -395,6 +439,348 @@ app.get<{ Params: { code: string } }>("/api/referrals/:code", async (req, reply)
   if (!u) return reply.status(404).send({ error: "Unknown code" });
   return { ok: true };
 });
+
+function requireVaultMaster(reply: { status: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  if (!vaultMasterKey) {
+    reply.status(503).send({ error: "VAULT_MASTER_KEY not configured" });
+    return false;
+  }
+  return true;
+}
+
+function requireVaultSigning(reply: { status: (n: number) => { send: (b: unknown) => unknown } }): boolean {
+  if (!requireVaultMaster(reply)) return false;
+  if (!ethClient || !ethRpcUrl) {
+    reply.status(503).send({ error: "ETH_RPC_URL required for vault signing" });
+    return false;
+  }
+  return true;
+}
+
+app.post<{ Body: { initData?: string } }>("/api/vault/create", async (req, reply) => {
+  if (!requireVaultMaster(reply)) return;
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  getOrCreateUser(db, v.userId, null);
+  const existing = getVault(db, v.userId);
+  if (existing) {
+    return { ok: true, address: existing.address, created: false };
+  }
+  const pk = generatePrivateKey();
+  const account = privateKeyToAccount(pk);
+  const enc = encryptPrivateKey(vaultMasterKey!, pk);
+  createVaultForUser(
+    db,
+    v.userId,
+    account.address,
+    Buffer.from(enc.ciphertextB64, "base64"),
+    enc.iv,
+    enc.authTagB64
+  );
+  return { ok: true, address: account.address, created: true };
+});
+
+app.post<{ Body: { initData?: string } }>("/api/vault/status", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const row = getVault(db, v.userId);
+  return {
+    vaultEnabled: Boolean(vaultMasterKey && ethClient && ethRpcUrl),
+    address: row?.address ?? null,
+    exportedOnce: Boolean(row?.exported_once),
+  };
+});
+
+app.post<{ Body: { initData?: string } }>("/api/vault/export", async (req, reply) => {
+  if (!requireVaultMaster(reply)) return;
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const row = getVault(db, v.userId);
+  if (!row) return reply.status(404).send({ error: "No vault" });
+  if (row.exported_once) {
+    return reply.status(403).send({ error: "Private key was already exported once" });
+  }
+  const pk = decryptPrivateKey(
+    vaultMasterKey!,
+    row.iv,
+    Buffer.from(row.enc_private_key).toString("base64"),
+    row.auth_tag
+  );
+  db.prepare(`UPDATE user_vaults SET exported_once = 1 WHERE telegram_id = ?`).run(v.userId);
+  return {
+    ok: true,
+    privateKey: pk,
+    warning: "Anyone with this key controls the wallet. Store offline; we cannot show it again.",
+  };
+});
+
+app.post<{
+  Body: { initData?: string; disputeKey?: string; price?: string };
+}>("/api/vault/vote/commit", async (req, reply) => {
+  if (!requireVaultSigning(reply)) return;
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  if (!vaultRateOk(v.userId, 3000)) {
+    return reply.status(429).send({ error: "Too many vault actions; wait a few seconds." });
+  }
+  const disputeKey = req.body?.disputeKey?.trim();
+  const priceStr = req.body?.price?.trim();
+  if (!disputeKey || !priceStr) {
+    return reply.status(400).send({ error: "disputeKey and price required" });
+  }
+  let price: bigint;
+  try {
+    price = BigInt(priceStr);
+  } catch {
+    return reply.status(400).send({ error: "Invalid price (int256 string)" });
+  }
+  const dispute = loadDisputeRowByKey(disputeKey);
+  if (!dispute) return reply.status(404).send({ error: "Unknown dispute" });
+  getOrCreateUser(db, v.userId, null);
+  try {
+    const { txHash } = await custodialCommitVote({
+      db,
+      masterKey: vaultMasterKey!,
+      publicClient: ethClient!,
+      ethRpcUrl,
+      telegramId: v.userId,
+      disputeKey,
+      dispute,
+      price,
+    });
+    return { ok: true, txHash };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Commit failed";
+    return reply.status(502).send({ error: msg });
+  }
+});
+
+app.post<{ Body: { initData?: string; disputeKey?: string } }>("/api/vault/vote/reveal", async (req, reply) => {
+  if (!requireVaultSigning(reply)) return;
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  if (!vaultRateOk(v.userId, 3000)) {
+    return reply.status(429).send({ error: "Too many vault actions; wait a few seconds." });
+  }
+  const disputeKey = req.body?.disputeKey?.trim();
+  if (!disputeKey) return reply.status(400).send({ error: "disputeKey required" });
+  getOrCreateUser(db, v.userId, null);
+  try {
+    const { txHash } = await custodialRevealVote({
+      db,
+      masterKey: vaultMasterKey!,
+      publicClient: ethClient!,
+      ethRpcUrl,
+      telegramId: v.userId,
+      disputeKey,
+    });
+    return { ok: true, txHash };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Reveal failed";
+    return reply.status(502).send({ error: msg });
+  }
+});
+
+app.post<{ Headers: Record<string, string | string[] | undefined>; Body: { telegramId?: string } }>(
+  "/api/internal/vault/create",
+  async (req, reply) => {
+    if (!requireInternal(req, reply)) return;
+    if (!requireVaultMaster(reply)) return;
+    const telegramId = req.body?.telegramId;
+    if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+    getOrCreateUser(db, telegramId, null);
+    const existing = getVault(db, telegramId);
+    if (existing) return { ok: true, address: existing.address, created: false };
+    const pk = generatePrivateKey();
+    const account = privateKeyToAccount(pk);
+    const enc = encryptPrivateKey(vaultMasterKey!, pk);
+    createVaultForUser(
+      db,
+      telegramId,
+      account.address,
+      Buffer.from(enc.ciphertextB64, "base64"),
+      enc.iv,
+      enc.authTagB64
+    );
+    return { ok: true, address: account.address, created: true };
+  }
+);
+
+app.get<{ Headers: Record<string, string | string[] | undefined>; Querystring: { telegramId?: string } }>(
+  "/api/internal/vault/status",
+  async (req, reply) => {
+    if (!requireInternal(req, reply)) return;
+    const telegramId = req.query.telegramId;
+    if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+    const row = getVault(db, telegramId);
+    return {
+      vaultEnabled: Boolean(vaultMasterKey && ethClient && ethRpcUrl),
+      address: row?.address ?? null,
+      exportedOnce: Boolean(row?.exported_once),
+    };
+  }
+);
+
+app.post<{ Headers: Record<string, string | string[] | undefined>; Body: { telegramId?: string } }>(
+  "/api/internal/vault/export",
+  async (req, reply) => {
+    if (!requireInternal(req, reply)) return;
+    if (!requireVaultMaster(reply)) return;
+    const telegramId = req.body?.telegramId;
+    if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+    const row = getVault(db, telegramId);
+    if (!row) return reply.status(404).send({ error: "No vault" });
+    if (row.exported_once) {
+      return reply.status(403).send({ error: "Private key was already exported once" });
+    }
+    const pk = decryptPrivateKey(
+      vaultMasterKey!,
+      row.iv,
+      Buffer.from(row.enc_private_key).toString("base64"),
+      row.auth_tag
+    );
+    db.prepare(`UPDATE user_vaults SET exported_once = 1 WHERE telegram_id = ?`).run(telegramId);
+    return { ok: true, privateKey: pk };
+  }
+);
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; disputeKey?: string; price?: string };
+}>("/api/internal/vault/vote/commit", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  if (!requireVaultSigning(reply)) return;
+  const telegramId = req.body?.telegramId;
+  const disputeKey = req.body?.disputeKey?.trim();
+  const priceStr = req.body?.price?.trim();
+  if (!telegramId || !disputeKey || !priceStr) {
+    return reply.status(400).send({ error: "telegramId, disputeKey, price required" });
+  }
+  if (!vaultRateOk(telegramId, 3000)) {
+    return reply.status(429).send({ error: "Too many vault actions" });
+  }
+  let price: bigint;
+  try {
+    price = BigInt(priceStr);
+  } catch {
+    return reply.status(400).send({ error: "Invalid price" });
+  }
+  const dispute = loadDisputeRowByKey(disputeKey);
+  if (!dispute) return reply.status(404).send({ error: "Unknown dispute" });
+  try {
+    const { txHash } = await custodialCommitVote({
+      db,
+      masterKey: vaultMasterKey!,
+      publicClient: ethClient!,
+      ethRpcUrl,
+      telegramId,
+      disputeKey,
+      dispute,
+      price,
+    });
+    return { ok: true, txHash };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Commit failed";
+    return reply.status(502).send({ error: msg });
+  }
+});
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; disputeKey?: string };
+}>("/api/internal/vault/vote/reveal", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  if (!requireVaultSigning(reply)) return;
+  const telegramId = req.body?.telegramId;
+  const disputeKey = req.body?.disputeKey?.trim();
+  if (!telegramId || !disputeKey) {
+    return reply.status(400).send({ error: "telegramId and disputeKey required" });
+  }
+  if (!vaultRateOk(telegramId, 3000)) {
+    return reply.status(429).send({ error: "Too many vault actions" });
+  }
+  try {
+    const { txHash } = await custodialRevealVote({
+      db,
+      masterKey: vaultMasterKey!,
+      publicClient: ethClient!,
+      ethRpcUrl,
+      telegramId,
+      disputeKey,
+    });
+    return { ok: true, txHash };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Reveal failed";
+    return reply.status(502).send({ error: msg });
+  }
+});
+
+app.get<{ Headers: Record<string, string | string[] | undefined>; Querystring: { telegramId?: string } }>(
+  "/api/internal/vault/pending-commits",
+  async (req, reply) => {
+    if (!requireInternal(req, reply)) return;
+    const telegramId = req.query.telegramId;
+    if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+    const rows = db
+      .prepare(
+        `SELECT dispute_key, identifier, timestamp, round_id, commit_tx_hash, created_at
+         FROM vault_vote_commits
+         WHERE telegram_id = ? AND revealed = 0 AND dispute_key IS NOT NULL AND dispute_key != ''
+         ORDER BY id DESC`
+      )
+      .all(telegramId) as {
+      dispute_key: string;
+      identifier: string;
+      timestamp: string;
+      round_id: string;
+      commit_tx_hash: string;
+      created_at: string;
+    }[];
+    return {
+      ok: true,
+      pending: rows.map((r) => ({
+        disputeKey: r.dispute_key,
+        roundId: r.round_id,
+        commitTxHash: r.commit_tx_hash,
+        createdAt: r.created_at,
+      })),
+    };
+  }
+);
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; state?: string; payloadJson?: string };
+}>("/api/internal/vote-wizard/save", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const telegramId = req.body?.telegramId;
+  const state = req.body?.state?.trim();
+  const payloadJson = req.body?.payloadJson ?? "{}";
+  if (!telegramId || !state) return reply.status(400).send({ error: "telegramId and state required" });
+  getOrCreateUser(db, telegramId, null);
+  db.prepare(
+    `INSERT INTO vote_wizard_sessions (telegram_id, state, payload_json, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(telegram_id) DO UPDATE SET
+       state = excluded.state,
+       payload_json = excluded.payload_json,
+       updated_at = datetime('now')`
+  ).run(telegramId, state, payloadJson);
+  return { ok: true };
+});
+
+app.get<{ Headers: Record<string, string | string[] | undefined>; Querystring: { telegramId?: string } }>(
+  "/api/internal/vote-wizard/load",
+  async (req, reply) => {
+    if (!requireInternal(req, reply)) return;
+    const telegramId = req.query.telegramId;
+    if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+    const row = db
+      .prepare(`SELECT state, payload_json FROM vote_wizard_sessions WHERE telegram_id = ?`)
+      .get(telegramId) as { state: string; payload_json: string } | undefined;
+    return { ok: true, session: row ?? null };
+  }
+);
 
 function assertCron(req: { query: { secret?: string } }, reply: { status: (n: number) => { send: (b: unknown) => unknown } }) {
   if (!cronSecret || req.query.secret !== cronSecret) {

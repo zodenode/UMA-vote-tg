@@ -14,6 +14,7 @@ export function openDb(filePath: string) {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const db = new Database(filePath);
+  db.pragma("foreign_keys = ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       telegram_id TEXT PRIMARY KEY,
@@ -70,6 +71,44 @@ export function openDb(filePath: string) {
     CREATE TABLE IF NOT EXISTS dispute_alert_sent (
       dispute_key TEXT PRIMARY KEY,
       sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS user_vaults (
+      telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+      address TEXT NOT NULL,
+      enc_private_key BLOB NOT NULL,
+      iv TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
+      key_version INTEGER NOT NULL DEFAULT 1,
+      exported_once INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS vault_vote_commits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+      dispute_key TEXT,
+      identifier TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      ancillary_data TEXT NOT NULL,
+      round_id TEXT NOT NULL,
+      price TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      commit_tx_hash TEXT NOT NULL,
+      revealed INTEGER NOT NULL DEFAULT 0,
+      reveal_tx_hash TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_vote_commit_unique
+      ON vault_vote_commits(telegram_id, identifier, timestamp, ancillary_data, round_id);
+
+    CREATE TABLE IF NOT EXISTS vote_wizard_sessions (
+      telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+      state TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
   migrateOoMultiChain(db);

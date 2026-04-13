@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import Home from "./pages/Home";
+import Landing from "./pages/Landing";
+import UmaInsureLanding from "./pages/UmaInsureLanding";
 import Swap from "./pages/Swap";
 import Votes from "./pages/Votes";
 import Account from "./pages/Account";
@@ -20,9 +22,38 @@ function applyTelegramTheme() {
   if (p.button_color) root.style.setProperty("--accent", p.button_color);
 }
 
+function VoteStartRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const sp = getStartParam();
+    if (!sp) return;
+    if (sp === "vote") {
+      navigate("/votes", { replace: true });
+      return;
+    }
+    if (sp.startsWith("vote_")) {
+      const token = sp.slice(5);
+      if (token.length > 0 && token.length <= 512) {
+        navigate(`/votes?focus=${encodeURIComponent(token)}`, { replace: true });
+      } else {
+        navigate("/votes", { replace: true });
+      }
+    }
+  }, [navigate]);
+  return null;
+}
+
 export default function App() {
+  const location = useLocation();
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [session, setSession] = useState<Session>(null);
+
+  const miniApp = Boolean(getInitData());
+  const path = location.pathname;
+  const onLanding = path === "/welcome" || path === "/insure" || (path === "/" && !miniApp);
+  const showTabBar =
+    (miniApp && ["/", "/swap", "/votes", "/account"].includes(path)) ||
+    (!miniApp && ["/swap", "/votes", "/account"].includes(path));
 
   useEffect(() => {
     applyTelegramTheme();
@@ -72,27 +103,32 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      <div className="app-shell">
+      <div className={onLanding ? "landing-wrap" : "app-shell"}>
+        <VoteStartRedirect />
         <Routes>
-          <Route path="/" element={<Home />} />
+          <Route path="/welcome" element={<Landing />} />
+          <Route path="/insure" element={<UmaInsureLanding />} />
+          <Route path="/" element={miniApp ? <Home /> : <Landing />} />
           <Route path="/swap" element={<Swap />} />
           <Route path="/votes" element={<Votes />} />
           <Route path="/account" element={<Account />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>
-      <nav className="tabbar" aria-label="Main">
-        {tabs.map((t) => (
-          <NavLink
-            key={t.to}
-            to={t.to}
-            end={t.end}
-            className={({ isActive }) => (isActive ? "active" : "")}
-          >
-            {t.label}
-          </NavLink>
-        ))}
-      </nav>
+      {showTabBar ? (
+        <nav className="tabbar" aria-label="Main">
+          {tabs.map((t) => (
+            <NavLink
+              key={t.to}
+              to={t.to}
+              end={t.end}
+              className={({ isActive }) => (isActive ? "active" : "")}
+            >
+              {t.label}
+            </NavLink>
+          ))}
+        </nav>
+      ) : null}
     </SessionProvider>
   );
 }
