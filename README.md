@@ -1,8 +1,8 @@
 # UMA Vote (Telegram)
 
-Telegram bot + Mini App for **acquiring UMA on Ethereum**, viewing **active DVM price requests** (via The Graph), **commit/reveal voting on `VotingV2` from the Mini App** (browser or WalletConnect wallet), optional **custodial vault** voting (encrypted keys on the API; bot `/vote` / `/reveal` and Mini App vault mode), and linking users to the official **[voter dApp](https://vote.umaproject.org/)** as a fallback. Swap quotes are proxied through **0x** with optional integrator fee parameters (default **0.5%** when `INTEGRATOR_FEE_BPS=50` and `FEE_RECIPIENT` is set).
+Telegram bot + Mini App focused on **Polygon** prediction-market **OOv2 disputes** (plus Ethereum OO where configured), **acquiring UMA on Ethereum** (0x), **commit/reveal on `VotingV2` (Ethereum)** from the Mini App (browser or WalletConnect), optional **custodial vault** voting (encrypted keys on the API; bot `/vote` / `/reveal` and Mini App vault mode), and linking users to the official **[voter dApp](https://vote.umaproject.org/)** as a fallback. Swap quotes are proxied through **0x** with optional integrator fee parameters (default **0.5%** when `INTEGRATOR_FEE_BPS=50` and `FEE_RECIPIENT` is set).
 
-**Scope (MVP):** Ethereum mainnet only for voting and UMA. This repo is **not** affiliated with the UMA Foundation.
+**Scope (MVP):** **Polygon-first** dispute surfacing and filters; **Ethereum mainnet** for DVM voting, UMA swaps, and `VotingV2` timing. This repo is **not** affiliated with the UMA Foundation.
 
 ## Monorepo layout
 
@@ -17,18 +17,18 @@ Telegram bot + Mini App for **acquiring UMA on Ethereum**, viewing **active DVM 
 1. Copy [`.env.example`](.env.example) to `.env` in the repo root (or set env per process). You need at least:
 
    - `BOT_TOKEN`, `WEB_APP_URL`, `API_PUBLIC_URL`, `INTERNAL_API_SECRET`, `CRON_SECRET`
-   - `THEGRAPH_API_KEY` (see [UMA subgraph docs](https://docs.uma.xyz/resources/subgraph-data))
-   - `ETH_RPC_URL` (HTTPS JSON-RPC) for **VotingV2** commit/reveal countdowns and **Ethereum** OOv2 `DisputePrice` indexing
-   - `POLYGON_RPC_URL` (optional) for **Polygon** OOv2 `DisputePrice` indexing (many markets settle OO on Polygon; DVM timing still uses Ethereum)
+   - `THEGRAPH_API_KEY` (recommended; see [UMA subgraph docs](https://docs.uma.xyz/resources/subgraph-data)). If The Graph fails or the key is unset, **`ETH_RPC_URL`** powers an on-chain **Active DVM price requests** list (`RequestAdded` + `getPriceRequestStatuses`).
+   - `POLYGON_RPC_URL` for **Polygon** OOv2 `DisputePrice` indexing (pre-filled in `.env.example` with a public RPC from [chainlist.org](https://chainlist.org) / [ethereum-lists/chains](https://github.com/ethereum-lists/chains))
+   - `ETH_RPC_URL` for **VotingV2** commit/reveal countdowns, **Ethereum** OOv2 `DisputePrice` indexing, and the DVM request RPC fallback above (same — default PublicNode URL in `.env.example`; use Alchemy/Infura in production)
    - `ZEROX_API_KEY`, `FEE_RECIPIENT` (required if `INTEGRATOR_FEE_BPS` > 0; default bps is **50** = 0.5% in `.env.example`)
    - `VAULT_MASTER_KEY` (optional) — **API only**; 32-byte secret for AES-GCM–encrypted per-user vault keys. **Custodial:** operator can sign txs the product allows; loss of DB + master key can drain vaults. Rotate/re-encrypt via your own runbook.
 
 ### Disputes & DVM alignment
 
-- **Detection:** The API watches **Ethereum** OOv2 (`0xA0Ae…3FFAe`) and, if configured, **Polygon** OOv2 (`0xee3a…7c24`) for **`DisputePrice`** events. This is faster than subgraph lag for “just flipped to disputed”.
+- **Detection:** The API watches **Polygon** OOv2 (`0xee3a…7c24`) when `POLYGON_RPC_URL` is set and **Ethereum** OOv2 (`0xA0Ae…3FFAe`) when `ETH_RPC_URL` is set for **`DisputePrice`** events. Indexed rows are **ordered with Polygon first** in API responses. This is faster than subgraph lag for “just flipped to disputed”.
 - **Timing:** Reads **`VotingV2`** (`0x004395…34ac`) for `getVotePhase`, `voteTiming.phaseLength`, `getCurrentRoundId`, and `getRoundEndTime` to show **time left in commit** vs **reveal**.
 - **Alerts:** The bot polls `/api/cron/pending-dispute-alerts` and messages subscribers with **“New disputed DVM query — commit/reveal ~Xh left”** (batched, de-duplicated per event).
-- **Filters (Mini App / `GET /api/votes`):** `source` (`polymarket` / `other`), `chain` (`1` Ethereum / `137` Polygon), `topic` (`crypto`, `geopolitics`, `sports`, `general`), `minBondWei`.
+- **Filters (Mini App / `GET /api/votes`):** `source` (`polymarket` / `other`), `chain` (`137` Polygon default in UI / `1` Ethereum / omit for all), `topic` (`crypto`, `geopolitics`, `sports`, `general`), `minBondWei`.
 - **Deep links:** Each dispute includes a **`vote.umaproject.org` URL** with `identifier`, `time`, and `ancillary` query params (`umaContext=1`) so users land with context (dApp may ignore unknown params).
 - **In-app voting:** The Mini App **Votes** tab can **`commitVote` / `revealVote`** on Ethereum mainnet (`VotingV2`). Commit salts are stored in **browser `localStorage`** for reveal; clearing site data requires using the dApp or re-committing. Set **`VITE_MAINNET_RPC_URL`** and **`VITE_WALLETCONNECT_PROJECT_ID`** for reliable RPC and mobile wallets (see `.env.example`).
 - **Custodial vault:** With **`VAULT_MASTER_KEY`** and **`ETH_RPC_URL`** on the API, users can create a vault wallet (encrypted in SQLite), optionally **export the private key once**, and **commit/reveal** via **`/vote`**, **`/reveal`**, **`/wallet`** in the bot (internal API + `INTERNAL_API_SECRET`) or the **Vote with custodial vault** path in the Mini App. Salts for vault commits are stored in **`vault_vote_commits`** on the server.
@@ -49,7 +49,7 @@ npm run dev:bot    # terminal 3
 
 3. In [@BotFather](https://t.me/BotFather), set the Mini App URL to your hosted `apps/web` build (HTTPS).
 
-Set `VITE_API_URL` / `VITE_PUBLIC_BOT_USERNAME` when building the web app so the client can reach the API and build `t.me` referral links. For on-chain voting UX, also set `VITE_MAINNET_RPC_URL` and (for Telegram mobile) `VITE_WALLETCONNECT_PROJECT_ID`.
+Set `VITE_API_URL` / `VITE_PUBLIC_BOT_USERNAME` when building the web app so the client can reach the API and build `t.me` referral links. `VITE_MAINNET_RPC_URL` and `VITE_POLYGON_RPC_URL` default to the same chainlist-style public endpoints in `.env.example`; add `VITE_WALLETCONNECT_PROJECT_ID` for Telegram mobile wallets.
 
 ## Deploy to production
 

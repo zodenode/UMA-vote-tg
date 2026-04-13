@@ -3,7 +3,8 @@ import cors from "@fastify/cors";
 import type { Hex, PublicClient } from "viem";
 import { openDb, getOrCreateUser } from "./db.js";
 import { verifyInitData, parseUserFromInitData } from "./telegramAuth.js";
-import { fetchActivePriceRequests, type PriceRequestSummary } from "./umaSubgraph.js";
+import { type PriceRequestSummary } from "./umaSubgraph.js";
+import { loadActivePriceRequests } from "./voteRequests.js";
 import {
   createEthClient,
   createPolygonOoClient,
@@ -11,7 +12,7 @@ import {
   rowToDisputeApi,
   txExplorerUrl,
 } from "./disputePoll.js";
-import { MAINNET, POLYGON } from "./contracts.js";
+import { MAINNET, POLYGON, UMA_POLYGON, WMATIC_POLYGON } from "./contracts.js";
 import { getDvmTiming, type DvmTiming } from "./dvmTiming.js";
 import { voterDappDeepLink } from "./disputeClassifier.js";
 import { parseVaultMasterKey, encryptPrivateKey, decryptPrivateKey } from "./vaultCrypto.js";
@@ -22,7 +23,12 @@ import {
   custodialRevealVote,
   getVault,
 } from "./custodialVoting.js";
-import { enrichDisputesForApi, type PolymarketEnrichment } from "./polymarketEnrichment.js";
+import {
+  enrichDisputesForApi,
+  extractConditionIdFromAncillary,
+  type PolymarketEnrichment,
+} from "./polymarketEnrichment.js";
+import { polymarketSearch } from "./polymarketSearch.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
@@ -32,7 +38,7 @@ const ZEROX_NATIVE_ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as const;
 const port = Number(process.env.PORT ?? 8787);
 const dbPath = process.env.DATABASE_PATH ?? "./data/uma-vote.db";
 const botToken = process.env.BOT_TOKEN ?? "";
-const graphKey = process.env.THEGRAPH_API_KEY;
+const graphKey = process.env.THEGRAPH_API_KEY?.trim() || undefined;
 const zeroXKey = process.env.ZEROX_API_KEY;
 const feeRecipient = process.env.FEE_RECIPIENT ?? "";
 const integratorFeeBps = Number(process.env.INTEGRATOR_FEE_BPS ?? "50");
@@ -115,7 +121,7 @@ function loadFilteredDisputes(filters: {
 }): DisputeRow[] {
   const raw = db
     .prepare(
-      `SELECT * FROM disputed_queries ORDER BY datetime(detected_at) DESC, chain_id, block_number DESC, log_index DESC LIMIT 400`
+      `SELECT * FROM disputed_queries ORDER BY datetime(detected_at) DESC, CASE WHEN chain_id = '137' THEN 0 ELSE 1 END, block_number DESC, log_index DESC LIMIT 400`
     )
     .all() as DisputeRow[];
   const src = filters.source?.toLowerCase();
@@ -164,6 +170,19 @@ function loadDisputeRowByKey(disputeKey: string): DisputeRow | undefined {
     | undefined;
 }
 
+function findDisputeRowByConditionId(conditionIdLower: string): DisputeRow | null {
+  const raw = db
+    .prepare(
+      `SELECT * FROM disputed_queries ORDER BY datetime(detected_at) DESC, CASE WHEN chain_id = '137' THEN 0 ELSE 1 END, block_number DESC, log_index DESC LIMIT 600`
+    )
+    .all() as DisputeRow[];
+  for (const r of raw) {
+    const cid = extractConditionIdFromAncillary(r.ancillary_data);
+    if (cid && cid.toLowerCase() === conditionIdLower) return r;
+  }
+  return null;
+}
+
 function requireInternal(req: { headers: Record<string, string | string[] | undefined> }, reply: { status: (n: number) => { send: (b: unknown) => unknown } }) {
   const h = req.headers.authorization;
   const token = typeof h === "string" && h.startsWith("Bearer ") ? h.slice(7) : "";
@@ -186,6 +205,39 @@ function requireInitData(initData: string | undefined) {
 }
 
 app.get("/health", async () => ({ ok: true }));
+
+app.get<{
+  Querystring: { q?: string; limit?: string };
+}>("/api/polymarket/search", async (req, reply) => {
+  const q = String(req.query.q ?? "").trim();
+  if (!q) return reply.status(400).send({ error: "q required" });
+  if (q.length > 240) return reply.status(400).send({ error: "q too long" });
+  const limit = Math.min(15, Math.max(1, Number(req.query.limit ?? 8)));
+  try {
+    const results = await polymarketSearch(q, limit);
+    return { results };
+  } catch (e) {
+    req.log.warn(e, "polymarket search failed");
+    return reply.status(502).send({ error: "Polymarket search unavailable" });
+  }
+});
+
+app.get<{
+  Querystring: { conditionId?: string };
+}>("/api/disputes/by-condition", async (req, reply) => {
+  const raw = String(req.query.conditionId ?? "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{64}$/.test(raw)) {
+    return reply.status(400).send({ error: "invalid conditionId" });
+  }
+  const row = findDisputeRowByConditionId(raw);
+  if (!row) return { found: false as const };
+  const chainId = Number(row.chain_id ?? 137);
+  return {
+    found: true as const,
+    disputeId: row.dispute_key,
+    chainId: Number.isFinite(chainId) ? chainId : 137,
+  };
+});
 
 app.post<{
   Headers: Record<string, string | string[] | undefined>;
@@ -263,13 +315,18 @@ app.get<{
     polygonOoConfigured: boolean;
     error?: string;
     subgraphError?: string;
+    requestsSource?: "subgraph" | "rpc";
     vaultEnabled: boolean;
   }> => {
     const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 25)));
     const chainQ = req.query.chain;
     const chainFilter =
       chainQ === "1" || chainQ === "137" ? (chainQ as "1" | "137") : undefined;
-    const subgraph = await fetchActivePriceRequests(graphKey, 20);
+    const { requests, subgraphError, requestsSource } = await loadActivePriceRequests(
+      graphKey,
+      ethClient,
+      20
+    );
     const dvm = ethClient ? await getDvmTiming(ethClient) : null;
     const rows = loadFilteredDisputes({
       source: req.query.source,
@@ -284,19 +341,10 @@ app.get<{
       ...rowToDisputeApi(r, currentDvmRound),
       polymarket: pmMap.get(r.dispute_key) ?? null,
     }));
-    if (!subgraph.ok) {
-      return {
-        subgraphError: subgraph.error,
-        requests: [],
-        disputes,
-        dvm,
-        rpcConfigured: Boolean(ethClient),
-        polygonOoConfigured: Boolean(polygonOoClient),
-        vaultEnabled: Boolean(vaultMasterKey && ethClient && ethRpcUrl),
-      };
-    }
     return {
-      requests: subgraph.requests,
+      requests,
+      subgraphError,
+      requestsSource,
       disputes,
       dvm,
       rpcConfigured: Boolean(ethClient),
@@ -312,29 +360,49 @@ app.get<{
     buyToken?: string;
     sellAmount?: string;
     takerAddress?: string;
+    chainId?: string;
   };
 }>("/api/swap/quote", async (req, reply) => {
   if (!zeroXKey) {
     return reply.status(503).send({ error: "ZEROX_API_KEY not configured" });
   }
-  const rawSell = req.query.sellToken ?? "ETH";
-  const sellToken =
-    typeof rawSell === "string" && rawSell.toUpperCase() === "ETH"
-      ? ZEROX_NATIVE_ETH
-      : /^0x[a-fA-F0-9]{40}$/.test(String(rawSell))
-        ? String(rawSell)
-        : WETH_MAINNET;
+  const rawChain = req.query.chainId ?? "137";
+  const chainId = rawChain === "1" || rawChain === "137" ? rawChain : "137";
+
+  const rawSell = String(req.query.sellToken ?? (chainId === "137" ? "POL" : "ETH"));
+  const upperSell = rawSell.toUpperCase();
+
+  let sellToken: string;
+  if (chainId === "137") {
+    if (upperSell === "POL" || upperSell === "MATIC") {
+      sellToken = ZEROX_NATIVE_ETH;
+    } else if (/^0x[a-fA-F0-9]{40}$/.test(rawSell)) {
+      sellToken = rawSell;
+    } else {
+      sellToken = WMATIC_POLYGON;
+    }
+  } else if (upperSell === "ETH") {
+    sellToken = ZEROX_NATIVE_ETH;
+  } else if (/^0x[a-fA-F0-9]{40}$/.test(rawSell)) {
+    sellToken = rawSell;
+  } else {
+    sellToken = WETH_MAINNET;
+  }
+
   const buyToken =
     typeof req.query.buyToken === "string" && /^0x[a-fA-F0-9]{40}$/.test(req.query.buyToken)
       ? req.query.buyToken
-      : UMA_MAINNET;
+      : chainId === "137"
+        ? UMA_POLYGON
+        : UMA_MAINNET;
+
   const sellAmount = req.query.sellAmount;
   if (!sellAmount) {
     return reply.status(400).send({ error: "sellAmount required (wei)" });
   }
   const taker = req.query.takerAddress ?? "0x0000000000000000000000000000000000000000";
   const params = new URLSearchParams({
-    chainId: "1",
+    chainId,
     sellToken,
     buyToken,
     sellAmount,
@@ -371,13 +439,18 @@ app.get<{
     data: tx?.data,
     value: tx?.value,
   };
+  const network = chainId === "137" ? "Polygon" : "Ethereum mainnet";
+  const disclosure =
+    chainId === "137"
+      ? "Swap API v2 (AllowanceHolder) on Polygon. Integrator fee may apply on the buy token. You pay Polygon gas in POL."
+      : "Swap API v2 (AllowanceHolder). Integrator fee uses swapFeeBps on the buy token when configured. You pay Ethereum network gas separately.";
   return {
     quote: normalized,
     integratorFeeBps,
     feeRecipient: feeRecipient || null,
-    network: "Ethereum mainnet",
-    disclosure:
-      "Swap API v2 (AllowanceHolder). Integrator fee uses swapFeeBps on the buy token when configured. You pay Ethereum network gas separately.",
+    chainId,
+    network,
+    disclosure,
   };
 });
 
@@ -846,8 +919,8 @@ app.post<{
 
 app.get<{ Querystring: { secret?: string } }>("/api/cron/digest-recipients", async (req, reply) => {
   if (!assertCron(req, reply)) return;
-  const result = await fetchActivePriceRequests(graphKey, 3);
-  if (!result.ok || result.requests.length === 0) return { telegramIds: [] as string[], preview: [] as string[] };
+  const { requests, requestsSource } = await loadActivePriceRequests(graphKey, ethClient, 3);
+  if (requests.length === 0) return { telegramIds: [] as string[], preview: [] as string[] };
   const dayMs = 86_400_000;
   const now = Date.now();
   const users = db.prepare(`SELECT telegram_id FROM users WHERE alerts_on = 1`).all() as {
@@ -862,9 +935,7 @@ app.get<{ Querystring: { secret?: string } }>("/api/cron/digest-recipients", asy
     if (now - last < dayMs) continue;
     telegramIds.push(u.telegram_id);
   }
-  const preview = result.requests.map(
-    (r) => `${r.identifierId} (round ${r.roundId ?? "—"})`
-  );
+  const preview = requests.map((r) => `${r.identifierId} (round ${r.roundId ?? "—"})${requestsSource === "rpc" ? " (RPC)" : ""}`);
   return { telegramIds, preview };
 });
 

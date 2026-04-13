@@ -1,4 +1,8 @@
 import { Link } from "react-router-dom";
+import LandingDisputesFeed from "../components/LandingDisputesFeed";
+import MarketDisputeFinder from "../components/MarketDisputeFinder";
+import { JusticeThemeGraphic } from "../components/JusticeThemeGraphic";
+import LandingNav from "../components/LandingNav";
 
 const botUser = import.meta.env.VITE_PUBLIC_BOT_USERNAME?.replace(/^@/, "") ?? "";
 
@@ -8,49 +12,44 @@ export default function Landing() {
   return (
     <div className="landing">
       <div className="landing-bg" aria-hidden />
-      <header className="landing-nav">
-        <span className="landing-logo">uma.vote</span>
-        <div className="landing-nav-actions">
-          <Link to="/insure" className="landing-link">
-            uma.insure
-          </Link>
-          <Link to="/votes" className="landing-link">
-            Web votes
-          </Link>
-          <Link to="/swap" className="landing-link">
-            Swap
-          </Link>
-          <a className="landing-btn landing-btn--ghost" href={tgHref} target="_blank" rel="noreferrer">
-            Telegram
-          </a>
-        </div>
-      </header>
+      <LandingNav />
 
       <main className="landing-main">
-        <section className="landing-hero">
-          <p className="landing-eyebrow">Ethereum · UMA DVM</p>
-          <h1 className="landing-title">
-            Vote the oracle.
-            <br />
-            <span className="landing-title-accent">From Telegram or the web.</span>
-          </h1>
-          <p className="landing-lead">
-            <strong>uma.vote</strong> is your companion for UMA: swap into UMA, track disputed price requests, commit and
-            reveal on <code>VotingV2</code>, and get alerts — without giving up custody.
-          </p>
-          <div className="landing-cta-row">
-            <a className="landing-btn landing-btn--primary" href={tgHref} target="_blank" rel="noreferrer">
-              Open in Telegram
-            </a>
-            <Link to="/votes" className="landing-btn landing-btn--secondary">
-              Vote in browser
-            </Link>
+        <section className="landing-hero landing-hero--wide">
+          <div className="landing-hero-split">
+            <div className="landing-hero-copy">
+              <p className="landing-eyebrow">Polygon markets · Ethereum DVM</p>
+              <h1 className="landing-title">
+                Vote the oracle.
+                <br />
+                <span className="landing-title-accent">From Telegram or the web.</span>
+              </h1>
+              <p className="landing-lead">
+                <strong>uma.vote</strong> is your companion for UMA: follow <b>Polygon</b> prediction-market disputes,
+                swap into UMA on Ethereum, commit and reveal on <code>VotingV2</code> (Ethereum), and get alerts —
+                without giving up custody.
+              </p>
+              <MarketDisputeFinder id="find-market" />
+              <div className="landing-cta-row">
+                <a className="landing-btn landing-btn--primary" href={tgHref} target="_blank" rel="noreferrer">
+                  Open in Telegram
+                </a>
+                <Link to="/votes" className="landing-btn landing-btn--secondary">
+                  Vote in browser
+                </Link>
+              </div>
+              <p className="landing-note">
+                On-chain actions use your wallet (injected or WalletConnect). In Telegram, use <b>/votes</b> for
+                per-request vote buttons that open the same secure flow.
+              </p>
+            </div>
+            <div className="landing-hero-art">
+              <JusticeThemeGraphic variant="hero" className="justice-wrap--light" />
+            </div>
           </div>
-          <p className="landing-note">
-            On-chain actions use your wallet (injected or WalletConnect). In Telegram, use <b>/votes</b> for per-request
-            vote buttons that open the same secure flow.
-          </p>
         </section>
+
+        <LandingDisputesFeed />
 
         <section className="landing-grid" aria-label="Features">
           <article className="landing-card landing-card--glow">
@@ -59,7 +58,8 @@ export default function Landing() {
             </span>
             <h2 className="landing-card-title">DVM voting</h2>
             <p className="landing-card-text">
-              Commit and reveal directly against UMA VotingV2 on mainnet, or fall back to the official voter dApp anytime.
+              Most live OO disputes surface on Polygon first; DVM commits still go to VotingV2 on Ethereum — or use the
+              official voter dApp anytime.
             </p>
           </article>
           <article className="landing-card">
@@ -75,9 +75,9 @@ export default function Landing() {
             <span className="landing-card-icon" aria-hidden>
               ⇄
             </span>
-            <h2 className="landing-card-title">ETH → UMA</h2>
+            <h2 className="landing-card-title">ETH → UMA (mainnet)</h2>
             <p className="landing-card-text">
-              Route swaps through 0x with clear fee disclosure so you can acquire voting power on Ethereum.
+              Acquire UMA for DVM weight via 0x on Ethereum; dispute lists emphasize Polygon OO where the action is.
             </p>
           </article>
         </section>
@@ -89,7 +89,7 @@ export default function Landing() {
               <span className="landing-step-num">1</span>
               <div>
                 <strong>Connect</strong>
-                <p className="landing-step-desc">WalletConnect or a browser wallet on mainnet.</p>
+                <p className="landing-step-desc">WalletConnect or a browser wallet on Ethereum for DVM signing.</p>
               </div>
             </li>
             <li>
@@ -103,7 +103,10 @@ export default function Landing() {
               <span className="landing-step-num">3</span>
               <div>
                 <strong>Commit → reveal</strong>
-                <p className="landing-step-desc">Salt stored locally for reveal; stake UMA on VotingV2 for weight.</p>
+                <p className="landing-step-desc">
+                  Salt stored locally for reveal. Stake on VotingV2 (official dApp) for weight — not bundled with commit
+                  here; commits without stake do not count until you are staked.
+                </p>
               </div>
             </li>
           </ol>

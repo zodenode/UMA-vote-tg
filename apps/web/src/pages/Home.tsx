@@ -5,8 +5,8 @@ export default function Home() {
     <>
       <h1>uma.vote</h1>
       <p className="muted">
-        Buy <b>UMA</b> on <b>Ethereum</b>, watch active DVM rounds, commit/reveal in this app, or use the official
-        voter dApp anytime.
+        Track <b>Polygon</b> disputes, buy <b>UMA</b> on <b>Ethereum</b> for voting weight, commit/reveal in this app,
+        or use the official voter dApp anytime.
       </p>
       <div className="card">
         <span className="badge">MVP</span>

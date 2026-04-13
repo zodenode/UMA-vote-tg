@@ -82,7 +82,7 @@ async function replyVotePicker(ctx: Context) {
   await ctx.reply(
     [
       "<b>Vote from the bot</b>",
-      "Each button opens the <b>Mini App</b> on that dispute — connect your wallet there to commit/reveal on Ethereum.",
+      "Each button opens the <b>Mini App</b> on that dispute — lists prioritize <b>Polygon</b> OO; DVM signing is still on <b>Ethereum</b>.",
       "",
       ...lines.map((l) => `• ${l}`),
       "",
@@ -244,6 +244,9 @@ bot.command("help", async (ctx) => {
       "/pin_vote_alert — short reminder + pin (needs pin permission)",
       "/squad — opted-in member count for this group",
       "",
+      "<b>Chains</b>",
+      "Dispute picks prioritize <b>Polygon</b> OO (prediction markets). DVM signing is on <b>Ethereum</b> (VotingV2).",
+      "",
       "<b>Custody</b>",
       "Vault keys are encrypted on the server; the operator can sign allowed txs. Not a hardware wallet.",
       "",
@@ -345,9 +348,9 @@ bot.command("pin_vote_alert", async (ctx) => {
   const msg = await ctx.reply(
     [
       "<b>UMA DVM vote window</b>",
-      "Commit and reveal on <b>vote.umaproject.org</b> (Ethereum).",
+      "Commit and reveal on <b>vote.umaproject.org</b> (Ethereum DVM).",
       "",
-      "Mini App helps you swap into UMA and see active rounds.",
+      "Mini App highlights Polygon disputes and helps you swap into UMA on Ethereum.",
     ].join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -402,12 +405,25 @@ async function replyVaultStatus(ctx: Context, uid: string) {
     address: string | null;
     exportedOnce: boolean;
   };
+  const depositBlock =
+    st.address != null
+      ? [
+          "",
+          "<b>Deposit ETH or POL</b>",
+          "Same address on every chain — pick the network in your wallet when sending.",
+          "• <b>Ethereum</b> — ETH for DVM gas; UMA to stake on VotingV2 from this address.",
+          "• <b>Polygon</b> — POL for gas on Polygon.",
+          "",
+          `<a href="https://etherscan.io/address/${st.address}">Etherscan</a> · <a href="https://polygonscan.com/address/${st.address}">Polygonscan</a>`,
+        ]
+      : [];
   const lines = [
     "<b>Custodial vault</b>",
     "",
     st.address
       ? `Address:\n<code>${escapeHtml(st.address)}</code>`
       : "<i>No vault yet.</i> Tap <b>Create</b> or use <code>/wallet create</code>.",
+    ...depositBlock,
     "",
     st.vaultEnabled
       ? "<i>Signing (commit/reveal) is available.</i>"
@@ -419,7 +435,7 @@ async function replyVaultStatus(ctx: Context, uid: string) {
         ? "You may <b>export</b> the raw key once (high risk)."
         : "",
     "",
-    "<b>Custody warning:</b> the operator can sign txs this product allows; DB + master key compromise drains the wallet. Fund gas + stake UMA on the vault address to vote.",
+    "<b>Custody warning:</b> the operator can sign txs this product allows; DB + master key compromise drains the wallet.",
   ];
   const kb = new InlineKeyboard();
   if (!st.address) kb.text("Create vault", "vault_create").row();
@@ -453,7 +469,7 @@ bot.callbackQuery("vault_create", async (ctx) => {
   const j = (await r.json()) as { address: string; created: boolean };
   await ctx.reply(
     j.created
-      ? `<b>Vault created.</b>\n<code>${escapeHtml(j.address)}</code>\n\nFund ETH for gas and stake UMA on this address for DVM weight.`
+      ? `<b>Vault created.</b>\n<code>${escapeHtml(j.address)}</code>\n\n<b>Deposit:</b> same address on <b>Ethereum</b> (ETH gas + UMA stake) and <b>Polygon</b> (POL gas). Use /wallet for links.`
       : `<b>Vault already exists.</b>\n<code>${escapeHtml(j.address)}</code>`,
     { parse_mode: "HTML" }
   );
@@ -503,7 +519,7 @@ bot.command("wallet", async (ctx) => {
     const j = (await r.json()) as { address: string; created: boolean };
     await ctx.reply(
       j.created
-        ? `Vault created:\n${j.address}\n\nFund ETH + stake UMA on this address.`
+        ? `Vault created:\n${j.address}\n\nDeposit ETH (Ethereum) for DVM gas, UMA to stake, or POL on Polygon — same address. /wallet for explorer links.`
         : `Vault already exists:\n${j.address}`
     );
     return;

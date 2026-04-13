@@ -297,8 +297,9 @@ export default function DvmInlineVote(props: {
   return (
     <div className="dvm-vote" style={{ marginTop: 12 }}>
       <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-        <b>Vote on-chain (Ethereum DVM)</b> — commits go to <code>VotingV2</code>. You pay gas. If you clear site
-        data, you lose the salt needed to reveal unless you use the official dApp.
+        <b>DVM vote (Ethereum)</b> — even when the dispute started on <b>Polygon OO</b>, commits go to{" "}
+        <code>VotingV2</code> on Ethereum. You pay gas. If you clear site data, you lose the salt for reveal unless you
+        use the official dApp.
       </p>
       {statusLabel ? (
         <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
@@ -397,7 +398,7 @@ export default function DvmInlineVote(props: {
           {embedWallet ? (
             <>
               <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-                Connect an Ethereum mainnet wallet to commit or reveal.
+                Connect an Ethereum mainnet wallet (DVM chain) to commit or reveal.
               </p>
               {connectors.map((c) => (
                 <button
@@ -414,7 +415,7 @@ export default function DvmInlineVote(props: {
             </>
           ) : (
             <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-              Connect an Ethereum mainnet wallet using the <b>Wallet</b> section above to commit or reveal.
+              Connect an Ethereum mainnet wallet using the <b>Wallet</b> section above (DVM lives on Ethereum).
             </p>
           )}
         </div>

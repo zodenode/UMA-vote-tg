@@ -75,35 +75,6 @@ export async function fetchActivePriceRequests(
       };
       errors?: { message: string }[];
     };
-    // #region agent log
-    {
-      let gatewayHost = "";
-      try {
-        gatewayHost = new URL(gatewayBase).host;
-      } catch {
-        gatewayHost = "(invalid THEGRAPH_GATEWAY_BASE)";
-      }
-      fetch("http://127.0.0.1:7911/ingest/eaba85da-e138-4901-ace5-7e31251a8b16", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "2cea3e" },
-        body: JSON.stringify({
-          sessionId: "2cea3e",
-          runId: "votes-subgraph",
-          hypothesisId: "H1",
-          location: "umaSubgraph.ts:afterRequest",
-          message: "The Graph subgraph response",
-          data: {
-            statusCode: res.statusCode,
-            gatewayHost,
-            subgraphIdLen: subgraphId.length,
-            graphQlErrors: body.errors?.map((e) => e.message.slice(0, 160)) ?? null,
-            hasData: Boolean(body.data),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    }
-    // #endregion
     if (body.errors?.length) {
       return { ok: false, error: body.errors.map((e) => e.message).join("; ") };
     }

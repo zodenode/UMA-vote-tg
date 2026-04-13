@@ -1,8 +1,9 @@
 import { createConfig, http } from "wagmi";
-import { mainnet } from "wagmi/chains";
+import { mainnet, polygon } from "wagmi/chains";
 import { injected, walletConnect } from "wagmi/connectors";
 
 const mainnetRpc = import.meta.env.VITE_MAINNET_RPC_URL as string | undefined;
+const polygonRpc = import.meta.env.VITE_POLYGON_RPC_URL as string | undefined;
 const walletConnectProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined;
 
 const connectors = [
@@ -14,7 +15,7 @@ const connectors = [
           showQrModal: true,
           metadata: {
             name: "UMA Vote",
-            description: "Swap UMA and vote on DVM requests (Ethereum mainnet).",
+            description: "Polygon-first disputes · DVM voting on Ethereum (VotingV2).",
             url: typeof window !== "undefined" ? window.location.origin : "https://localhost",
             icons: [],
           },
@@ -23,10 +24,12 @@ const connectors = [
     : []),
 ];
 
+/** Mainnet first = safer default for DVM pages; Swap tab connects/switches to Polygon explicitly. */
 export const wagmiConfig = createConfig({
-  chains: [mainnet],
+  chains: [mainnet, polygon],
   connectors,
   transports: {
     [mainnet.id]: http(mainnetRpc || undefined),
+    [polygon.id]: http(polygonRpc || undefined),
   },
 });

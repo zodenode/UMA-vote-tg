@@ -4,8 +4,10 @@ import { useSearchParams } from "react-router-dom";
 import type { Hex } from "viem";
 import { mainnet } from "wagmi/chains";
 import { useAccount, useConnect, useChainId, useSwitchChain } from "wagmi";
-import { apiGet, apiPost, getInitData } from "../api";
+import { apiGet } from "../api";
 import DvmInlineVote from "../components/DvmInlineVote";
+import MarketDisputeFinder from "../components/MarketDisputeFinder";
+import VaultCustodialPanel from "../components/VaultCustodialPanel";
 import { decodeVoteFocusToken } from "../voteFocusToken";
 
 type VoteReq = {
@@ -75,6 +77,7 @@ type VotesPayload = {
   rpcConfigured: boolean;
   polygonOoConfigured: boolean;
   subgraphError?: string;
+  requestsSource?: "subgraph" | "rpc";
   vaultEnabled?: boolean;
 };
 
@@ -104,7 +107,8 @@ function VotesWalletBar() {
     <div className="card">
       <h2>Wallet</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        DVM votes are signed on <b>Ethereum mainnet</b>. Use a browser wallet or WalletConnect (set{" "}
+        <b>Polygon</b> is where most prediction-market OO disputes show up first. <b>DVM commit/reveal</b> still signs on{" "}
+        <b>Ethereum mainnet</b> (<code>VotingV2</code>) — use a browser wallet or WalletConnect (set{" "}
         <code>VITE_WALLETCONNECT_PROJECT_ID</code> for Telegram mobile).
       </p>
       {!isConnected ? (
@@ -139,115 +143,6 @@ function VotesWalletBar() {
           Connected <code>{address?.slice(0, 6)}…{address?.slice(-4)}</code>
         </p>
       )}
-    </div>
-  );
-}
-
-function VaultCustodyCard(props: { apiVaultEnabled: boolean }) {
-  const init = getInitData();
-  const q = useQuery({
-    queryKey: ["vault-status", init.length],
-    queryFn: () =>
-      apiPost<{ vaultEnabled: boolean; address: string | null; exportedOnce: boolean }>(
-        "/api/vault/status",
-        { initData: getInitData() }
-      ),
-    enabled: Boolean(init),
-    staleTime: 45_000,
-  });
-
-  if (!init) {
-    return (
-      <div className="card">
-        <h2>Custodial vault</h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Open this app inside Telegram to create or use a <b>vault wallet</b> (server-signed commit/reveal). In a normal
-          browser there is no Telegram session to verify.
-        </p>
-      </div>
-    );
-  }
-
-  const st = q.data;
-  const signingOk = Boolean(st?.vaultEnabled ?? props.apiVaultEnabled);
-
-  return (
-    <div className="card">
-      <h2>Custodial vault</h2>
-      <p className="muted" style={{ marginTop: 0 }}>
-        Optional <b>vault address</b> held encrypted on the API. Commit/reveal can run without WalletConnect.{" "}
-        <b>Custody:</b> the operator can sign txs this app allows; compromise of DB + master key drains the wallet — not
-        a hardware wallet.
-      </p>
-      {q.isPending ? <p className="muted">Loading vault…</p> : null}
-      {q.isError ? <p className="muted" style={{ color: "var(--danger)" }}>Could not load vault status.</p> : null}
-      {st ? (
-        <>
-          {!signingOk ? (
-            <p className="muted" style={{ color: "var(--danger)", fontSize: 13 }}>
-              Vault signing is off until the API has <code>VAULT_MASTER_KEY</code> and <code>ETH_RPC_URL</code>. You can
-              still create an address.
-            </p>
-          ) : null}
-          {st.address ? (
-            <p className="muted" style={{ wordBreak: "break-all", fontSize: 13 }}>
-              Address: <code>{st.address}</code>
-            </p>
-          ) : (
-            <p className="muted">No vault yet.</p>
-          )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-            {!st.address ? (
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={q.isFetching}
-                onClick={async () => {
-                  try {
-                    await apiPost("/api/vault/create", { initData: getInitData() });
-                    await q.refetch();
-                  } catch (e) {
-                    window.alert(e instanceof Error ? e.message : "Create failed");
-                  }
-                }}
-              >
-                Create vault
-              </button>
-            ) : null}
-            {st.address && !st.exportedOnce ? (
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={async () => {
-                  if (
-                    !window.confirm(
-                      "Export private key ONE time only. Anyone with this key controls the wallet. Continue?"
-                    )
-                  )
-                    return;
-                  try {
-                    const out = await apiPost<{ privateKey: string; warning?: string }>("/api/vault/export", {
-                      initData: getInitData(),
-                    });
-                    await navigator.clipboard.writeText(out.privateKey);
-                    window.alert("Private key copied to clipboard. Store it offline and clear clipboard when done.");
-                    await q.refetch();
-                  } catch (e) {
-                    window.alert(e instanceof Error ? e.message : "Export failed");
-                  }
-                }}
-              >
-                Export key (once)
-              </button>
-            ) : null}
-          </div>
-          {st.exportedOnce ? (
-            <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-              Private key was already exported — cannot export again.
-            </p>
-          ) : null}
-        </>
-      ) : null}
     </div>
   );
 }
@@ -309,7 +204,7 @@ function PolymarketInfo(props: { pm: NonNullable<PolymarketBlock> }) {
 export default function Votes() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [source, setSource] = useState<string>("");
-  const [chain, setChain] = useState<string>("");
+  const [chain, setChain] = useState<string>("137");
   const [topic, setTopic] = useState<string>("");
   const [minBond, setMinBond] = useState<string>("");
   const [searchParams] = useSearchParams();
@@ -393,14 +288,105 @@ export default function Votes() {
     <>
       <h1>Votes & disputes</h1>
       <p className="muted">
-        <b>Disputed</b> OO queries are indexed from <code>DisputePrice</code> logs on Ethereum (
-        <code>ETH_RPC_URL</code>) and optionally Polygon (<code>POLYGON_RPC_URL</code>). DVM commit/reveal timing
-        always comes from <code>VotingV2</code> on Ethereum mainnet — it is not chain-agnostic.
+        <b>Active DVM requests</b> load from The Graph when <code>THEGRAPH_API_KEY</code> works, otherwise from{" "}
+        <code>VotingV2</code> logs via <code>ETH_RPC_URL</code> (same data as vote.umaproject.org, without participation
+        % from the indexer). <b>Disputed</b> OO queries use <code>DisputePrice</code> on Polygon (
+        <code>POLYGON_RPC_URL</code>) and Ethereum. DVM commit/reveal timing is always mainnet <code>VotingV2</code>.
       </p>
+
+      <div className="card">
+        <MarketDisputeFinder className="market-finder--embedded" />
+      </div>
 
       <VotesWalletBar />
 
-      <VaultCustodyCard apiVaultEnabled={Boolean(data.vaultEnabled)} />
+      <VaultCustodialPanel apiVaultEnabled={Boolean(data.vaultEnabled)} />
+
+      <h2>Active DVM price requests</h2>
+      {data.subgraphError ? (
+        <p className="muted" style={{ color: data.requestsSource === "rpc" ? "var(--muted)" : "var(--danger)" }}>
+          {data.requestsSource === "rpc" ? (
+            <>
+              <b>Subgraph:</b> {data.subgraphError} — <b>list below uses on-chain RPC</b> (recent{" "}
+              <code>RequestAdded</code> events + <code>getPriceRequestStatuses</code>).
+            </>
+          ) : (
+            <>
+              <b>Could not load proposals:</b> {data.subgraphError}
+            </>
+          )}
+        </p>
+      ) : null}
+      {list.length === 0 ? (
+        <div className="card">
+          <p className="muted">
+            No unresolved DVM price requests right now, or the API cannot reach Ethereum (set <code>ETH_RPC_URL</code>{" "}
+            for the on-chain fallback when The Graph fails).
+          </p>
+        </div>
+      ) : (
+        list.map((r) => {
+          const expanded = openId === r.id;
+          return (
+            <div
+              key={r.id}
+              className={`card${focusId === r.id ? " vote-card--focus" : ""}`}
+              ref={(el) => {
+                voteCardRefs.current.set(r.id, el);
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <strong>{r.identifierId}</strong>
+                <span className="badge">Round {r.roundId ?? "—"}</span>
+              </div>
+              <p className="muted" style={{ marginTop: 8 }}>
+                Requested: {new Date(Number(r.time) * 1000).toLocaleString()}
+              </p>
+              {r.participationPct != null ? (
+                <p className="muted">Participation: {r.participationPct}%</p>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ marginTop: 8 }}
+                onClick={() => setOpenId(expanded ? null : r.id)}
+              >
+                {expanded ? "Hide details" : "Details"}
+              </button>
+              {expanded ? (
+                <pre
+                  className="muted"
+                  style={{
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontSize: 12,
+                    marginTop: 8,
+                  }}
+                >
+                  id: {r.id}
+                  {"\n"}
+                  ancillary: {r.ancillaryData ?? "—"}
+                </pre>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ marginTop: 8 }}
+                onClick={() => openVoter()}
+              >
+                Open voter dApp
+              </button>
+              <DvmInlineVote
+                identifier={identifierToHex(r.identifierId)}
+                time={r.time}
+                ancillaryData={r.ancillaryData}
+                proposedPrice={null}
+                dvm={dvm}
+              />
+            </div>
+          );
+        })
+      )}
 
       <div className="card">
         <h2>Filters</h2>
@@ -428,9 +414,9 @@ export default function Votes() {
           value={chain}
           onChange={(e) => setChain(e.target.value)}
         >
-          <option value="">All</option>
+          <option value="137">Polygon (default)</option>
+          <option value="">All chains</option>
           <option value="1">Ethereum</option>
-          <option value="137">Polygon</option>
         </select>
         <label className="muted" htmlFor="top" style={{ display: "block", marginTop: 12 }}>
           Topic tag
@@ -491,15 +477,16 @@ export default function Votes() {
       {!data.rpcConfigured && !data.polygonOoConfigured ? (
         <div className="card">
           <p className="muted" style={{ color: "var(--danger)" }}>
-            <b>No ETH_RPC_URL or POLYGON_RPC_URL</b> — on-chain disputed-query indexing is off. The subgraph list
-            below may still show DVM price requests.
+            <b>No POLYGON_RPC_URL or ETH_RPC_URL</b> — disputed-query indexing and the DVM RPC proposal fallback are off.
+            Set <code>ETH_RPC_URL</code> to load active price requests when The Graph is unavailable.
           </p>
         </div>
       ) : null}
       {!data.rpcConfigured ? (
         <div className="card">
           <p className="muted">
-            <code>ETH_RPC_URL</code> is unset — Ethereum OO disputes and live DVM phase timing are unavailable.
+            <code>ETH_RPC_URL</code> is unset — live DVM phase timing from <code>VotingV2</code> is unavailable (Ethereum
+            OO indexing is off too).
           </p>
         </div>
       ) : null}
@@ -569,80 +556,6 @@ export default function Votes() {
             />
           </div>
         ))
-      )}
-
-      <h2>DVM price requests (subgraph)</h2>
-      {data.subgraphError ? (
-        <p className="muted" style={{ color: "var(--danger)" }}>
-          Subgraph: {data.subgraphError}
-        </p>
-      ) : null}
-      {list.length === 0 ? (
-        <div className="card">
-          <p className="muted">No unresolved price requests from the voting subgraph (or nothing active).</p>
-        </div>
-      ) : (
-        list.map((r) => {
-          const expanded = openId === r.id;
-          return (
-            <div
-              key={r.id}
-              className={`card${focusId === r.id ? " vote-card--focus" : ""}`}
-              ref={(el) => {
-                voteCardRefs.current.set(r.id, el);
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                <strong>{r.identifierId}</strong>
-                <span className="badge">Round {r.roundId ?? "—"}</span>
-              </div>
-              <p className="muted" style={{ marginTop: 8 }}>
-                Requested: {new Date(Number(r.time) * 1000).toLocaleString()}
-              </p>
-              {r.participationPct != null ? (
-                <p className="muted">Participation: {r.participationPct}%</p>
-              ) : null}
-              <button
-                type="button"
-                className="btn btn-secondary"
-                style={{ marginTop: 8 }}
-                onClick={() => setOpenId(expanded ? null : r.id)}
-              >
-                {expanded ? "Hide details" : "Details"}
-              </button>
-              {expanded ? (
-                <pre
-                  className="muted"
-                  style={{
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    fontSize: 12,
-                    marginTop: 8,
-                  }}
-                >
-                  id: {r.id}
-                  {"\n"}
-                  ancillary: {r.ancillaryData ?? "—"}
-                </pre>
-              ) : null}
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ marginTop: 8 }}
-                onClick={() => openVoter()}
-              >
-                Open voter dApp
-              </button>
-              <DvmInlineVote
-                identifier={identifierToHex(r.identifierId)}
-                time={r.time}
-                ancillaryData={r.ancillaryData}
-                proposedPrice={null}
-                dvm={dvm}
-              />
-            </div>
-          );
-        })
       )}
 
       <button type="button" className="btn btn-secondary" style={{ marginTop: 16 }} onClick={() => q.refetch()}>

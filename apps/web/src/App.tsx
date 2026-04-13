@@ -3,6 +3,7 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "reac
 import Home from "./pages/Home";
 import Landing from "./pages/Landing";
 import UmaInsureLanding from "./pages/UmaInsureLanding";
+import VoterLanding from "./pages/VoterLanding";
 import Swap from "./pages/Swap";
 import Votes from "./pages/Votes";
 import Account from "./pages/Account";
@@ -50,7 +51,8 @@ export default function App() {
 
   const miniApp = Boolean(getInitData());
   const path = location.pathname;
-  const onLanding = path === "/welcome" || path === "/insure" || (path === "/" && !miniApp);
+  const onLanding =
+    path === "/welcome" || path === "/insure" || path === "/voter" || (path === "/" && !miniApp);
   const showTabBar =
     (miniApp && ["/", "/swap", "/votes", "/account"].includes(path)) ||
     (!miniApp && ["/swap", "/votes", "/account"].includes(path));
@@ -107,6 +109,7 @@ export default function App() {
         <VoteStartRedirect />
         <Routes>
           <Route path="/welcome" element={<Landing />} />
+          <Route path="/voter" element={<VoterLanding />} />
           <Route path="/insure" element={<UmaInsureLanding />} />
           <Route path="/" element={miniApp ? <Home /> : <Landing />} />
           <Route path="/swap" element={<Swap />} />

@@ -11,6 +11,12 @@ export const POLYGON = {
   optimisticOracleV2: "0xee3afe347d5c74317041e2618c49534daf887c24" as const,
 };
 
+/** Bridged UMA on Polygon PoS (canonical ERC-20 for swaps / Polymarket ecosystem) */
+export const UMA_POLYGON = "0x3066818837c5eaebE13C6F0aB246081f20285C01" as const;
+
+/** Wrapped native gas token on Polygon (WMATIC; same contract post POL rebrand) */
+export const WMATIC_POLYGON = "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270" as const;
+
 export const votingV2Abi = [
   {
     inputs: [],

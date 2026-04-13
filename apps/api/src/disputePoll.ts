@@ -24,8 +24,13 @@ export function toHttpRpcUrl(rpcUrl: string): string {
   return t;
 }
 
+const rpcTimeoutMs = Number(process.env.ETH_HTTP_TIMEOUT_MS ?? "120000") || 120_000;
+
 export function createOoClient(rpcUrl: string, chain: Chain): PublicClient {
-  return createPublicClient({ chain, transport: http(toHttpRpcUrl(rpcUrl)) });
+  return createPublicClient({
+    chain,
+    transport: http(toHttpRpcUrl(rpcUrl), { timeout: rpcTimeoutMs }),
+  });
 }
 
 export function createEthClient(rpcUrl: string): PublicClient {

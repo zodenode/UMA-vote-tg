@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { apiPost, getInitData, getTelegramChat } from "../api";
+import VaultCustodialPanel from "../components/VaultCustodialPanel";
 import { useSession } from "../session";
 
 const botUser = import.meta.env.VITE_PUBLIC_BOT_USERNAME ?? "YOUR_BOT";
@@ -76,9 +77,13 @@ export default function Account() {
     <>
       <h1>Account</h1>
 
+      <VaultCustodialPanel />
+
       <div className="card">
         <h2>Wallet (EVM)</h2>
-        <p className="muted">Use an Ethereum mainnet wallet. Telegram Wallet is not a substitute for EVM here.</p>
+        <p className="muted">
+          DVM signing uses an <b>Ethereum mainnet</b> wallet. Telegram Wallet is not a substitute for EVM here.
+        </p>
         {!isConnected ? (
           connectors.map((c) => (
             <button
