@@ -1,11 +1,13 @@
 import type { Hex, PublicClient } from "viem";
 import { keccak256, parseAbiItem } from "viem";
 import { MAINNET } from "./contracts.js";
+import { getLogsSafeUpperBound } from "./ethLogsTip.js";
 import type { PriceRequestSummary } from "./umaSubgraph.js";
 
 /** Matches VotingV2 `RequestAdded` (see UMAprotocol/subgraphs votingV2 mappings). */
+/** Must match VotingV2.sol — roundId is uint32 (uint256 would change topic0 and match zero logs). */
 const requestAddedEvent = parseAbiItem(
-  "event RequestAdded(address indexed requester, uint256 indexed roundId, bytes32 indexed identifier, uint256 time, bytes ancillaryData, bool isGovernance)"
+  "event RequestAdded(address indexed requester, uint32 indexed roundId, bytes32 indexed identifier, uint256 time, bytes ancillaryData, bool isGovernance)"
 );
 
 const votingV2StatusAbi = [
@@ -63,12 +65,13 @@ export async function fetchActivePriceRequestsFromRpc(
     BigInt(Math.max(5000, Number(process.env.VOTING_REQUEST_LOG_LOOKBACK_BLOCKS ?? "80000") || 80_000));
   const chunk =
     opts?.logChunkSize ??
-    BigInt(Math.max(500, Number(process.env.VOTING_REQUEST_LOG_CHUNK_BLOCKS ?? "1999") || 1999));
+    /** Default 999 so public RPCs with ~1000-block getLogs caps match dispute indexing (see OO_LOG_CHUNK_BLOCKS). */
+    BigInt(Math.max(500, Number(process.env.VOTING_REQUEST_LOG_CHUNK_BLOCKS ?? "999") || 999));
   /** Stop scanning older blocks once we have enough distinct requests (recent activity is usually enough). */
   const stopAfterUnique = Math.max(40, Number(process.env.VOTING_REQUEST_LOG_STOP_UNIQUE ?? "140") || 140);
 
   try {
-    const latest = await client.getBlockNumber();
+    const latest = await getLogsSafeUpperBound(client);
     const minBlock = latest > lookback ? latest - lookback + 1n : 0n;
 
     type Row = { identifier: Hex; time: bigint; ancillaryData: Hex; blockNumber: bigint };
@@ -80,11 +83,15 @@ export async function fetchActivePriceRequestsFromRpc(
       let start = end > span ? end - span : minBlock;
       if (start < minBlock) start = minBlock;
 
+      const tip = await getLogsSafeUpperBound(client);
+      const toBlock = end > tip ? tip : end;
+      const fromBlock = start > toBlock ? toBlock : start;
+
       const logs = await client.getLogs({
         address: MAINNET.votingV2,
         event: requestAddedEvent,
-        fromBlock: start,
-        toBlock: end,
+        fromBlock,
+        toBlock,
       });
 
       for (const log of logs) {

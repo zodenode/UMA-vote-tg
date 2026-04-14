@@ -12,6 +12,7 @@ import {
 import { mainnet, polygon } from "viem/chains";
 import { ooV2Abi } from "./contracts.js";
 import { classifyDispute, voterDappDeepLink } from "./disputeClassifier.js";
+import { getLogsSafeUpperBound } from "./ethLogsTip.js";
 
 const disputePriceAbi = parseAbiItem(
   "event DisputePrice(address indexed requester, address indexed proposer, address indexed disputer, bytes32 identifier, uint256 timestamp, bytes ancillaryData, int256 proposedPrice)"
@@ -74,7 +75,7 @@ export async function pollDisputePriceLogs(
     .prepare(`SELECT last_block FROM oo_chain_cursor WHERE chain_id = ?`)
     .get(chainIdStr) as { last_block: number };
   let fromBlock = BigInt(cursorRow.last_block);
-  const latest = await client.getBlockNumber();
+  const latest = await getLogsSafeUpperBound(client);
 
   if (fromBlock === 0n) {
     fromBlock = latest > lookbackBlocks ? latest - lookbackBlocks : 0n;
@@ -92,8 +93,13 @@ export async function pollDisputePriceLogs(
 
   const logs: Log[] = [];
   let chunkFrom = fromBlock;
-  while (chunkFrom <= latest) {
-    const chunkTo = chunkFrom + ooLogChunkBlocks > latest ? latest : chunkFrom + ooLogChunkBlocks;
+  /** Some RPCs return eth_blockNumber slightly ahead of the chain tip eth_getLogs accepts. */
+  let indexedThrough = latest;
+  while (true) {
+    const tip = await getLogsSafeUpperBound(client);
+    indexedThrough = tip;
+    if (chunkFrom > tip) break;
+    const chunkTo = chunkFrom + ooLogChunkBlocks > tip ? tip : chunkFrom + ooLogChunkBlocks;
     try {
       const chunk = await client.getLogs({
         address: ooAddress,
@@ -192,7 +198,7 @@ export async function pollDisputePriceLogs(
   }
 
   db.prepare(`UPDATE oo_chain_cursor SET last_block = ? WHERE chain_id = ?`).run(
-    Number(latest),
+    Number(indexedThrough),
     chainIdStr
   );
   if (inserted > 0)
@@ -200,7 +206,7 @@ export async function pollDisputePriceLogs(
       msg: "DisputePrice logs indexed",
       chainId: chainIdStr,
       inserted,
-      latest: latest.toString(),
+      latest: indexedThrough.toString(),
     });
   return inserted;
 }
