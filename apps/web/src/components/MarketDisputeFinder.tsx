@@ -80,7 +80,7 @@ export default function MarketDisputeFinder({ className = "", id }: { className?
         );
         if (r.found && r.disputeId) {
           const token = encodeVoteFocusToken(r.disputeId);
-          navigate(`/votes?focus=${encodeURIComponent(token)}`);
+          navigate(`/votes/dispute/${token}`);
           setInput("");
           setOpen(false);
         } else {

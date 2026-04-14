@@ -21,7 +21,9 @@ import {
   createVaultForUser,
   custodialCommitVote,
   custodialRevealVote,
+  custodialWithdrawNative,
   getVault,
+  maxNativeWithdrawWei,
 } from "./custodialVoting.js";
 import {
   enrichDisputesForApi,
@@ -29,6 +31,12 @@ import {
   type PolymarketEnrichment,
 } from "./polymarketEnrichment.js";
 import { polymarketSearch } from "./polymarketSearch.js";
+import { fetchPolymarketPriceHistory } from "./polymarketPricesHistory.js";
+import { decodeVoteFocusToken } from "./voteFocusToken.js";
+import {
+  computePolymarketReversalWatch,
+  type ReversalWatchResult,
+} from "./polymarketReversalSignal.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
@@ -223,6 +231,18 @@ app.get<{
 });
 
 app.get<{
+  Querystring: { tokenId?: string; interval?: string };
+}>("/api/polymarket/prices-history", async (req, reply) => {
+  const tokenId = String(req.query.tokenId ?? "").trim();
+  const interval = String(req.query.interval ?? "1d").trim();
+  const out = await fetchPolymarketPriceHistory(tokenId, interval);
+  if (!out.ok) {
+    return reply.status(400).send({ error: out.error });
+  }
+  return { history: out.history };
+});
+
+app.get<{
   Querystring: { conditionId?: string };
 }>("/api/disputes/by-condition", async (req, reply) => {
   const raw = String(req.query.conditionId ?? "").trim().toLowerCase();
@@ -238,6 +258,46 @@ app.get<{
     chainId: Number.isFinite(chainId) ? chainId : 137,
   };
 });
+
+app.get<{
+  Params: { token: string };
+}>(
+  "/api/dispute/:token",
+  async (req, reply): Promise<{
+    dispute: ReturnType<typeof rowToDisputeApi> & {
+      polymarket: PolymarketEnrichment | null;
+    } & ReversalWatchResult;
+    dvm: DvmTiming | null;
+    vaultEnabled: boolean;
+    rpcConfigured: boolean;
+    polygonOoConfigured: boolean;
+  } | void> => {
+    const decoded = decodeVoteFocusToken(req.params.token);
+    if (!decoded) {
+      return reply.status(400).send({ error: "invalid token" });
+    }
+    const row = loadDisputeRowByKey(decoded);
+    if (!row) {
+      return reply.status(404).send({ error: "dispute not found" });
+    }
+    const dvm = ethClient ? await getDvmTiming(ethClient) : null;
+    const currentDvmRound = dvm?.roundId ?? null;
+    const pmMap = await enrichDisputesForApi([row], 5);
+    const polymarket = pmMap.get(row.dispute_key) ?? null;
+    const dispute = {
+      ...rowToDisputeApi(row, currentDvmRound),
+      polymarket,
+      ...computePolymarketReversalWatch(row.proposed_price, polymarket),
+    };
+    return {
+      dispute,
+      dvm,
+      vaultEnabled: Boolean(vaultMasterKey && ethClient && ethRpcUrl),
+      rpcConfigured: Boolean(ethClient),
+      polygonOoConfigured: Boolean(polygonOoClient),
+    };
+  }
+);
 
 app.post<{
   Headers: Record<string, string | string[] | undefined>;
@@ -309,7 +369,9 @@ app.get<{
   "/api/votes",
   async (req): Promise<{
     requests: PriceRequestSummary[];
-    disputes: (ReturnType<typeof rowToDisputeApi> & { polymarket: PolymarketEnrichment | null })[];
+    disputes: (ReturnType<typeof rowToDisputeApi> & {
+      polymarket: PolymarketEnrichment | null;
+    } & ReversalWatchResult)[];
     dvm: DvmTiming | null;
     rpcConfigured: boolean;
     polygonOoConfigured: boolean;
@@ -337,10 +399,14 @@ app.get<{
     });
     const currentDvmRound = dvm?.roundId ?? null;
     const pmMap = await enrichDisputesForApi(rows, 15);
-    const disputes = rows.map((r) => ({
-      ...rowToDisputeApi(r, currentDvmRound),
-      polymarket: pmMap.get(r.dispute_key) ?? null,
-    }));
+    const disputes = rows.map((r) => {
+      const polymarket = pmMap.get(r.dispute_key) ?? null;
+      return {
+        ...rowToDisputeApi(r, currentDvmRound),
+        polymarket,
+        ...computePolymarketReversalWatch(r.proposed_price, polymarket),
+      };
+    });
     return {
       requests,
       subgraphError,
@@ -530,6 +596,25 @@ function requireVaultSigning(reply: { status: (n: number) => { send: (b: unknown
   return true;
 }
 
+function requireVaultWithdraw(
+  chainId: 1 | 137,
+  reply: { status: (n: number) => { send: (b: unknown) => unknown } }
+): boolean {
+  if (!requireVaultMaster(reply)) return false;
+  if (chainId === 1) {
+    if (!ethClient || !ethRpcUrl) {
+      reply.status(503).send({ error: "ETH_RPC_URL required for Ethereum withdrawals" });
+      return false;
+    }
+    return true;
+  }
+  if (!polygonOoClient || !polygonRpcUrl) {
+    reply.status(503).send({ error: "POLYGON_RPC_URL required for Polygon withdrawals" });
+    return false;
+  }
+  return true;
+}
+
 app.post<{ Body: { initData?: string } }>("/api/vault/create", async (req, reply) => {
   if (!requireVaultMaster(reply)) return;
   const v = requireInitData(req.body?.initData);
@@ -562,6 +647,84 @@ app.post<{ Body: { initData?: string } }>("/api/vault/status", async (req, reply
     address: row?.address ?? null,
     exportedOnce: Boolean(row?.exported_once),
   };
+});
+
+app.post<{ Body: { initData?: string } }>("/api/vault/balances", async (req, reply) => {
+  if (!requireVaultMaster(reply)) return;
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const row = getVault(db, v.userId);
+  if (!row?.address) {
+    return reply.status(404).send({ error: "No vault" });
+  }
+  const addr = row.address as `0x${string}`;
+  let ethWei: string | null = null;
+  let polWei: string | null = null;
+  if (ethClient) {
+    const b = await ethClient.getBalance({ address: addr });
+    ethWei = b.toString();
+  }
+  if (polygonOoClient) {
+    const b = await polygonOoClient.getBalance({ address: addr });
+    polWei = b.toString();
+  }
+  return { address: row.address, ethWei, polWei };
+});
+
+app.post<{
+  Body: { initData?: string; chainId?: number | string; to?: string; amountWei?: string };
+}>("/api/vault/withdraw", async (req, reply) => {
+  const rawChain = Number(req.body?.chainId);
+  if (rawChain !== 1 && rawChain !== 137) {
+    return reply.status(400).send({ error: "chainId must be 1 or 137" });
+  }
+  const chainId = rawChain as 1 | 137;
+  if (!requireVaultWithdraw(chainId, reply)) return;
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  if (!vaultRateOk(v.userId, 3000)) {
+    return reply.status(429).send({ error: "Too many vault actions; wait a few seconds." });
+  }
+  const to = String(req.body?.to ?? "").trim();
+  const amountRaw = String(req.body?.amountWei ?? "").trim();
+  if (!to || !amountRaw) {
+    return reply.status(400).send({ error: "to and amountWei required (amountWei may be MAX for full native minus gas)" });
+  }
+  const pc = chainId === 1 ? ethClient! : polygonOoClient!;
+  const row = getVault(db, v.userId);
+  if (!row) return reply.status(404).send({ error: "No vault" });
+  const vaultAddr = row.address as `0x${string}`;
+  let amountWei: bigint;
+  if (amountRaw.toUpperCase() === "MAX") {
+    amountWei = await maxNativeWithdrawWei(pc, vaultAddr);
+    if (amountWei <= 0n) {
+      return reply.status(400).send({ error: "Nothing to withdraw after reserving gas" });
+    }
+  } else {
+    try {
+      amountWei = BigInt(amountRaw);
+    } catch {
+      return reply.status(400).send({ error: "Invalid amountWei" });
+    }
+  }
+  getOrCreateUser(db, v.userId, null);
+  try {
+    const { txHash } = await custodialWithdrawNative({
+      db,
+      masterKey: vaultMasterKey!,
+      telegramId: v.userId,
+      chainId,
+      to: to as `0x${string}`,
+      amountWei,
+      ethRpcUrl,
+      polygonRpcUrl,
+      publicClient: pc,
+    });
+    return { ok: true, txHash, chainId };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Withdraw failed";
+    return reply.status(502).send({ error: msg });
+  }
 });
 
 app.post<{ Body: { initData?: string } }>("/api/vault/export", async (req, reply) => {
@@ -716,6 +879,79 @@ app.post<{ Headers: Record<string, string | string[] | undefined>; Body: { teleg
     return { ok: true, privateKey: pk };
   }
 );
+
+app.get<{ Headers: Record<string, string | string[] | undefined>; Querystring: { telegramId?: string } }>(
+  "/api/internal/vault/balances",
+  async (req, reply) => {
+    if (!requireInternal(req, reply)) return;
+    if (!requireVaultMaster(reply)) return;
+    const telegramId = req.query.telegramId;
+    if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+    const row = getVault(db, telegramId);
+    if (!row?.address) return reply.status(404).send({ error: "No vault" });
+    const addr = row.address as `0x${string}`;
+    let ethWei: string | null = null;
+    let polWei: string | null = null;
+    if (ethClient) ethWei = (await ethClient.getBalance({ address: addr })).toString();
+    if (polygonOoClient) polWei = (await polygonOoClient.getBalance({ address: addr })).toString();
+    return { address: row.address, ethWei, polWei };
+  }
+);
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; chainId?: number; to?: string; amountWei?: string };
+}>("/api/internal/vault/withdraw", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const telegramId = req.body?.telegramId?.trim();
+  const rawChain = Number(req.body?.chainId);
+  const to = String(req.body?.to ?? "").trim();
+  const amountRaw = String(req.body?.amountWei ?? "").trim();
+  if (!telegramId || !to || !amountRaw) {
+    return reply.status(400).send({ error: "telegramId, chainId, to, amountWei required" });
+  }
+  if (rawChain !== 1 && rawChain !== 137) {
+    return reply.status(400).send({ error: "chainId must be 1 or 137" });
+  }
+  const chainId = rawChain as 1 | 137;
+  if (!requireVaultWithdraw(chainId, reply)) return;
+  if (!vaultRateOk(telegramId, 3000)) {
+    return reply.status(429).send({ error: "Too many vault actions" });
+  }
+  const pc = chainId === 1 ? ethClient! : polygonOoClient!;
+  const row = getVault(db, telegramId);
+  if (!row) return reply.status(404).send({ error: "No vault" });
+  const vaultAddr = row.address as `0x${string}`;
+  let amountWei: bigint;
+  if (amountRaw.toUpperCase() === "MAX") {
+    amountWei = await maxNativeWithdrawWei(pc, vaultAddr);
+    if (amountWei <= 0n) return reply.status(400).send({ error: "Nothing to withdraw after gas reserve" });
+  } else {
+    try {
+      amountWei = BigInt(amountRaw);
+    } catch {
+      return reply.status(400).send({ error: "Invalid amountWei" });
+    }
+  }
+  getOrCreateUser(db, telegramId, null);
+  try {
+    const { txHash } = await custodialWithdrawNative({
+      db,
+      masterKey: vaultMasterKey!,
+      telegramId,
+      chainId,
+      to: to as `0x${string}`,
+      amountWei,
+      ethRpcUrl,
+      polygonRpcUrl,
+      publicClient: pc,
+    });
+    return { ok: true, txHash, chainId };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Withdraw failed";
+    return reply.status(502).send({ error: msg });
+  }
+});
 
 app.post<{
   Headers: Record<string, string | string[] | undefined>;

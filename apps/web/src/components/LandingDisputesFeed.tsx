@@ -102,7 +102,7 @@ export default function LandingDisputesFeed() {
               d.polymarket?.title?.trim() ||
               `${d.source} · ${shortHex(d.identifier, 12, 8)}`;
             const focus = encodeVoteFocusToken(d.id);
-            const voteHref = `/votes?focus=${encodeURIComponent(focus)}`;
+            const voteHref = `/votes/dispute/${focus}`;
             const stakeHref = d.voterDappUrl?.trim() || "https://vote.umaproject.org/";
 
             return (

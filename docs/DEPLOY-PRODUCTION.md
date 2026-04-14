@@ -186,6 +186,8 @@ To reduce the number of billable services, you can run **API and bot** in one pr
 
 | Symptom | Likely cause |
 | ------- | ------------ |
+| Bot **never replies** to `/start` but process logs “running (polling)” | A **webhook** is still set on the same bot token (another host or an old deploy). Telegram delivers updates to the webhook URL, not to `getUpdates`. The worker now calls **`deleteWebhook` on startup**; redeploy the bot. You can also clear it manually: `https://api.telegram.org/bot<TOKEN>/deleteWebhook`. |
+| Two bot replicas / two processes with the same `BOT_TOKEN` | **409** / “Conflict: terminated by other getUpdates” — run **only one** bot worker (Railway: single replica; no second local `dev:bot` against prod token). |
 | Mini App “session could not be verified” | `BOT_TOKEN` mismatch between Telegram and API, or wrong `API_PUBLIC_URL` / CORS. |
 | Empty **Active DVM price requests** | Set **`ETH_RPC_URL`** on the API (required for RPC fallback). Without it, a broken or missing **`THEGRAPH_API_KEY`** leaves the list empty. Prefer a provider that allows **`eth_getLogs`** over a few thousand blocks (some free RPCs time out). |
 | Empty **disputes** only | Missing `POLYGON_RPC_URL` / `ETH_RPC_URL` for OO indexing, or no `DisputePrice` events in the poll window yet. |

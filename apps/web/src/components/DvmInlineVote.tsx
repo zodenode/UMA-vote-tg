@@ -136,19 +136,13 @@ export default function DvmInlineVote(props: {
 
   const stakeWei = stakeData?.[0];
 
-  const onCommit = async () => {
-    setVoteErr(null);
+  const commitWithPrice = async (price: bigint) => {
     if (!address || !publicClient) {
       setVoteErr("Connect wallet first.");
       return;
     }
     if (dvm?.phase !== "commit") {
       setVoteErr("Commit is only allowed during the DVM commit phase.");
-      return;
-    }
-    const price = parsePriceInput(priceStr);
-    if (price === null) {
-      setVoteErr("Enter a valid integer price (int256), e.g. proposed value from the OO request.");
       return;
     }
     try {
@@ -192,6 +186,36 @@ export default function DvmInlineVote(props: {
     } catch (e) {
       setVoteErr(e instanceof Error ? e.message : "Commit failed");
     }
+  };
+
+  const onCommit = async () => {
+    setVoteErr(null);
+    if (!address || !publicClient) {
+      setVoteErr("Connect wallet first.");
+      return;
+    }
+    const price = parsePriceInput(priceStr);
+    if (price === null) {
+      setVoteErr("Enter a valid integer price (int256), e.g. proposed value from the OO request.");
+      return;
+    }
+    await commitWithPrice(price);
+  };
+
+  /** One wallet signature: commit using the OO disputed price already on the request (when present). */
+  const onCommitWithProposed = async () => {
+    setVoteErr(null);
+    if (!address || !publicClient) {
+      setVoteErr("Connect wallet first.");
+      return;
+    }
+    const price = proposedPrice != null && proposedPrice !== "" ? parsePriceInput(proposedPrice.trim()) : null;
+    if (price === null) {
+      setVoteErr("No proposed price on this dispute — enter a price manually or use the official dApp.");
+      return;
+    }
+    setPriceStr(proposedPrice!.trim());
+    await commitWithPrice(price);
   };
 
   const onReveal = async () => {
@@ -244,19 +268,8 @@ export default function DvmInlineVote(props: {
   const showVault = Boolean(vaultDisputeKey && getInitData());
   const vaultCanSign = Boolean(vaultSigningEnabled && showVault);
 
-  const onVaultCommit = async () => {
-    setVaultMsg(null);
-    setVoteErr(null);
+  const vaultCommitWithPrice = async (price: bigint) => {
     if (!vaultDisputeKey) return;
-    if (dvm?.phase !== "commit") {
-      setVaultMsg("Commit is only allowed during the DVM commit phase.");
-      return;
-    }
-    const price = parsePriceInput(priceStr);
-    if (price === null) {
-      setVaultMsg("Enter a valid integer price (int256 wei).");
-      return;
-    }
     setVaultBusy(true);
     try {
       const out = await apiPost<{ txHash: string }>("/api/vault/vote/commit", {
@@ -270,6 +283,39 @@ export default function DvmInlineVote(props: {
     } finally {
       setVaultBusy(false);
     }
+  };
+
+  const onVaultCommit = async () => {
+    setVaultMsg(null);
+    setVoteErr(null);
+    if (!vaultDisputeKey) return;
+    if (dvm?.phase !== "commit") {
+      setVaultMsg("Commit is only allowed during the DVM commit phase.");
+      return;
+    }
+    const price = parsePriceInput(priceStr);
+    if (price === null) {
+      setVaultMsg("Enter a valid integer price (int256 wei).");
+      return;
+    }
+    await vaultCommitWithPrice(price);
+  };
+
+  const onVaultCommitWithProposed = async () => {
+    setVaultMsg(null);
+    setVoteErr(null);
+    if (!vaultDisputeKey) return;
+    if (dvm?.phase !== "commit") {
+      setVaultMsg("Commit is only allowed during the DVM commit phase.");
+      return;
+    }
+    const price = proposedPrice != null && proposedPrice !== "" ? parsePriceInput(proposedPrice.trim()) : null;
+    if (price === null) {
+      setVaultMsg("No proposed price on this dispute.");
+      return;
+    }
+    setPriceStr(proposedPrice!.trim());
+    await vaultCommitWithPrice(price);
   };
 
   const onVaultReveal = async () => {
@@ -322,9 +368,20 @@ export default function DvmInlineVote(props: {
           disabled={dvm?.phase !== "commit"}
         />
         {proposedPrice != null && proposedPrice !== "" ? (
-          <button type="button" className="btn btn-secondary" onClick={useProposed}>
-            Use proposed
-          </button>
+          <>
+            <button type="button" className="btn btn-secondary btn-press" onClick={useProposed}>
+              Use proposed
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-press"
+              title="Fills the disputed price and opens one commit transaction (you still sign in wallet)."
+              disabled={writing || confirming || dvm?.phase !== "commit" || !address || wrongChain}
+              onClick={() => void onCommitWithProposed()}
+            >
+              Commit with proposed price
+            </button>
+          </>
         ) : null}
       </div>
 
@@ -367,9 +424,19 @@ export default function DvmInlineVote(props: {
           ) : null}
           {useVault ? (
             <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {proposedPrice != null && proposedPrice !== "" ? (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-press"
+                  disabled={vaultBusy || dvm?.phase !== "commit" || !vaultCanSign}
+                  onClick={() => void onVaultCommitWithProposed()}
+                >
+                  {vaultBusy ? "Sending…" : "Commit with proposed (vault)"}
+                </button>
+              ) : null}
               <button
                 type="button"
-                className="btn btn-primary"
+                className="btn btn-primary btn-press"
                 disabled={vaultBusy || dvm?.phase !== "commit" || !vaultCanSign}
                 onClick={() => void onVaultCommit()}
               >

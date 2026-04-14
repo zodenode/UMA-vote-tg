@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { ArrowLeftRight, Home as HomeIcon, ListTree, UserRound } from "lucide-react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import Home from "./pages/Home";
+import HomePage from "./pages/Home";
 import Landing from "./pages/Landing";
 import UmaInsureLanding from "./pages/UmaInsureLanding";
 import VoterLanding from "./pages/VoterLanding";
 import Swap from "./pages/Swap";
 import Votes from "./pages/Votes";
+import VoteDisputeDetail from "./pages/VoteDisputeDetail";
 import Account from "./pages/Account";
 import { apiPost, getInitData, getStartParam } from "./api";
 import { SessionProvider, type Session } from "./session";
@@ -21,6 +23,25 @@ function applyTelegramTheme() {
   if (p.hint_color) root.style.setProperty("--muted", p.hint_color);
   if (p.link_color) root.style.setProperty("--accent", p.link_color);
   if (p.button_color) root.style.setProperty("--accent", p.button_color);
+  try {
+    tw.setHeaderColor?.("secondary_bg_color");
+  } catch {
+    /* ignore */
+  }
+}
+
+function subscribeMobileNav(cb: () => void) {
+  const mql = window.matchMedia("(max-width: 639px)");
+  mql.addEventListener("change", cb);
+  return () => mql.removeEventListener("change", cb);
+}
+
+function getMobileNavSnapshot() {
+  return window.matchMedia("(max-width: 639px)").matches;
+}
+
+function getMobileNavServerSnapshot() {
+  return false;
 }
 
 function VoteStartRedirect() {
@@ -35,7 +56,7 @@ function VoteStartRedirect() {
     if (sp.startsWith("vote_")) {
       const token = sp.slice(5);
       if (token.length > 0 && token.length <= 512) {
-        navigate(`/votes?focus=${encodeURIComponent(token)}`, { replace: true });
+        navigate(`/votes/dispute/${token}`, { replace: true });
       } else {
         navigate("/votes", { replace: true });
       }
@@ -50,12 +71,28 @@ export default function App() {
   const [session, setSession] = useState<Session>(null);
 
   const miniApp = Boolean(getInitData());
+  const isMobileWebNav = useSyncExternalStore(
+    subscribeMobileNav,
+    getMobileNavSnapshot,
+    getMobileNavServerSnapshot
+  );
   const path = location.pathname;
   const onLanding =
     path === "/welcome" || path === "/insure" || path === "/voter" || (path === "/" && !miniApp);
+  const onVotesSection = path === "/votes" || path.startsWith("/votes/");
+  const onMobileWebShell =
+    isMobileWebNav &&
+    (path === "/" ||
+      path === "/welcome" ||
+      path === "/voter" ||
+      path === "/insure" ||
+      path === "/swap" ||
+      onVotesSection ||
+      path === "/account");
   const showTabBar =
-    (miniApp && ["/", "/swap", "/votes", "/account"].includes(path)) ||
-    (!miniApp && ["/swap", "/votes", "/account"].includes(path));
+    (miniApp && (path === "/" || path === "/swap" || onVotesSection || path === "/account")) ||
+    (!miniApp && onMobileWebShell) ||
+    (!miniApp && !isMobileWebNav && (path === "/swap" || onVotesSection || path === "/account"));
 
   useEffect(() => {
     applyTelegramTheme();
@@ -84,12 +121,13 @@ export default function App() {
   }, []);
 
   const tabs = useMemo(
-    () => [
-      { to: "/", label: "Home", end: true },
-      { to: "/swap", label: "Swap" },
-      { to: "/votes", label: "Votes" },
-      { to: "/account", label: "Account" },
-    ],
+    () =>
+      [
+        { to: "/", label: "Home", end: true as const, icon: HomeIcon, matchHomeAliases: true as const },
+        { to: "/swap", label: "Swap", end: false as const, icon: ArrowLeftRight },
+        { to: "/votes", label: "Votes", end: false as const, icon: ListTree },
+        { to: "/account", label: "Account", end: false as const, icon: UserRound },
+      ] as const,
     []
   );
 
@@ -105,31 +143,52 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      <div className={onLanding ? "landing-wrap" : "app-shell"}>
+      <div
+        className={[
+          onLanding ? "landing-wrap" : "app-shell",
+          showTabBar && onLanding ? "with-bottom-tabbar" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <VoteStartRedirect />
         <Routes>
           <Route path="/welcome" element={<Landing />} />
           <Route path="/voter" element={<VoterLanding />} />
           <Route path="/insure" element={<UmaInsureLanding />} />
-          <Route path="/" element={miniApp ? <Home /> : <Landing />} />
+          <Route path="/" element={miniApp ? <HomePage /> : <Landing />} />
           <Route path="/swap" element={<Swap />} />
           <Route path="/votes" element={<Votes />} />
+          <Route path="/votes/dispute/:token" element={<VoteDisputeDetail />} />
           <Route path="/account" element={<Account />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>
       {showTabBar ? (
-        <nav className="tabbar" aria-label="Main">
-          {tabs.map((t) => (
-            <NavLink
-              key={t.to}
-              to={t.to}
-              end={t.end}
-              className={({ isActive }) => (isActive ? "active" : "")}
-            >
-              {t.label}
-            </NavLink>
-          ))}
+        <nav
+          className={["tabbar", miniApp ? "tabbar--miniapp" : isMobileWebNav ? "tabbar--mobile-web" : ""]
+            .filter(Boolean)
+            .join(" ")}
+          aria-label="Main"
+        >
+          {tabs.map((t) => {
+            const Icon = t.icon;
+            return (
+              <NavLink
+                key={t.to}
+                to={t.to}
+                end={t.end}
+                className={({ isActive }) => {
+                  const active =
+                    "matchHomeAliases" in t && t.matchHomeAliases ? isActive || path === "/welcome" : isActive;
+                  return active ? "active" : "";
+                }}
+              >
+                <Icon className="tabbar-icon" aria-hidden strokeWidth={2} />
+                <span className="tabbar-text">{t.label}</span>
+              </NavLink>
+            );
+          })}
         </nav>
       ) : null}
     </SessionProvider>

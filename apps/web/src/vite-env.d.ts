@@ -30,6 +30,7 @@ interface TelegramWebApp {
   colorScheme?: "light" | "dark";
   openLink: (url: string, opts?: { try_instant_view?: boolean }) => void;
   close: () => void;
+  setHeaderColor?: (colorKey: "bg_color" | "secondary_bg_color") => void;
 }
 
 interface Window {

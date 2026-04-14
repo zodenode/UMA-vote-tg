@@ -4,12 +4,15 @@ import {
   http,
   keccak256,
   encodePacked,
+  isAddress,
+  getAddress,
   type Address,
+  type Chain,
   type Hex,
   type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { mainnet } from "viem/chains";
+import { mainnet, polygon } from "viem/chains";
 import crypto from "node:crypto";
 import { MAINNET } from "./contracts.js";
 import { toHttpRpcUrl } from "./disputePoll.js";
@@ -310,5 +313,57 @@ export async function custodialRevealVote(opts: {
     )
     .run(txHash, row.id);
 
+  return { txHash };
+}
+
+const NATIVE_TRANSFER_GAS = 21_000n;
+
+/** Balance minus a conservative native transfer fee (legacy gas price × 21k × 1.2). */
+export async function maxNativeWithdrawWei(publicClient: PublicClient, vaultAddress: Address): Promise<bigint> {
+  const bal = await publicClient.getBalance({ address: vaultAddress });
+  const gasPrice = await publicClient.getGasPrice();
+  const fee = (gasPrice * NATIVE_TRANSFER_GAS * 120n) / 100n;
+  return bal > fee ? bal - fee : 0n;
+}
+
+export async function custodialWithdrawNative(opts: {
+  db: Database.Database;
+  masterKey: Buffer;
+  telegramId: string;
+  chainId: 1 | 137;
+  to: Address;
+  /** Amount recipient receives; gas is paid from the same balance on top. */
+  amountWei: bigint;
+  ethRpcUrl: string;
+  polygonRpcUrl: string;
+  publicClient: PublicClient;
+}): Promise<{ txHash: Hex }> {
+  if (opts.amountWei <= 0n) throw new Error("Amount must be positive");
+  if (!isAddress(opts.to)) throw new Error("Invalid recipient");
+  const to = getAddress(opts.to);
+  const vault = getVault(opts.db, opts.telegramId);
+  if (!vault) throw new Error("No vault for user");
+  const pk = decryptVaultKey(opts.masterKey, vault);
+  const account = privateKeyToAccount(pk);
+  if (getAddress(account.address) === to) throw new Error("Recipient cannot be the vault itself");
+  const chain: Chain = opts.chainId === 137 ? polygon : mainnet;
+  const rpc = opts.chainId === 137 ? opts.polygonRpcUrl : opts.ethRpcUrl;
+  const walletClient = createWalletClient({
+    account,
+    chain,
+    transport: http(toHttpRpcUrl(rpc)),
+  });
+  const bal = await opts.publicClient.getBalance({ address: account.address });
+  const gasPrice = await opts.publicClient.getGasPrice();
+  const gasReserve = (gasPrice * NATIVE_TRANSFER_GAS * 120n) / 100n;
+  if (bal < opts.amountWei + gasReserve) {
+    throw new Error("Insufficient balance for amount plus gas");
+  }
+  const txHash = await walletClient.sendTransaction({
+    chain,
+    account,
+    to,
+    value: opts.amountWei,
+  });
   return { txHash };
 }

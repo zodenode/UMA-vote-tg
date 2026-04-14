@@ -18,6 +18,23 @@ const welcomePhotoFileId = process.env.WELCOME_PHOTO_FILE_ID?.trim();
 
 const bot = new Bot(token);
 
+/** Log handler failures so a single bad update does not look like a “dead” bot. */
+bot.catch((err) => {
+  console.error("[grammy]", err.error);
+});
+
+/**
+ * Long polling ignores updates while a webhook URL is still registered.
+ * Clear it on boot so polling works after BotFather / another host set a webhook.
+ */
+async function clearWebhookForPolling() {
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: false });
+  } catch (e) {
+    console.warn("deleteWebhook failed (continuing):", e);
+  }
+}
+
 /** Pass-through start param for Mini App (Telegram passes as start_param / tgWebAppStartParam when supported). */
 function webAppUrlWithStartParam(base: string, startapp: string): string {
   const b = base.replace(/\/$/, "");
@@ -27,27 +44,44 @@ function webAppUrlWithStartParam(base: string, startapp: string): string {
 
 function welcomeCaptionHtml(): string {
   return [
-    "<b>uma.vote</b>",
+    "🗳 <b>uma.vote</b>",
     "",
-    "Swap into <b>UMA</b>, track DVM rounds, and <b>vote</b> (Mini App + wallet). Use <code>/votes</code> for per-dispute buttons.",
+    "👉 Tap <b>Search or paste link — Vote</b> — Polymarket URL, condition id, or type a name. Vote in the Mini App.",
     "",
-    "<b>Tip:</b> open the Mini App or tap <b>Vote from bot</b> below.",
+    "💎 Need <b>UMA</b> first? Open <b>Mini App home</b> → Swap.",
     "",
-    "<i>Not affiliated with the UMA Foundation — see docs.uma.xyz</i>",
+    "<i>Not affiliated with the UMA Foundation — docs.uma.xyz</i>",
+  ].join("\n");
+}
+
+function morePanelCaptionHtml(): string {
+  return [
+    "⚙️ <b>More</b>",
+    "",
+    "🔐 <b>Vault</b> — custodial wallet (deposit / withdraw native ETH·POL, commit/reveal).",
+    "🌐 <b>Official dApp</b> — button below.",
+    "",
+    "⌨️ <code>/help</code> — full command list",
   ].join("\n");
 }
 
 function mainMenuKeyboard(alertsOn: boolean) {
   const kb = new InlineKeyboard();
   if (webAppUrl) {
-    kb.webApp("📱 Open Mini App", webAppUrl).row();
-    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("🔍 Search or paste link — Vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("📱 Mini App (home)", webAppUrl).row();
   }
-  kb.text("📋 Vote from bot", "vote_list").row();
-  kb.text("🔐 Vault (custody)", "vault_menu").row();
-  kb.text(alertsOn ? "🔔 ON ✓" : "🔔 On", "alerts_on").text(alertsOn ? "🔕 Off" : "🔕 OFF ✓", "alerts_off").row();
+  kb.text("📋 Indexed disputes", "vote_list").row();
+  kb.text(alertsOn ? "🔔 Alerts ON" : "🔔 Alerts off", "alerts_on").text(alertsOn ? "🔕 Turn off" : "🔕 Turn on", "alerts_off").row();
+  kb.text("⚙️ More · vault & links", "menu_more").row();
+  return kb;
+}
+
+function moreMenuKeyboard() {
+  const kb = new InlineKeyboard();
+  kb.text("🔐 Open vault", "vault_menu").row();
   kb.url("🌐 Official voter dApp", "https://vote.umaproject.org/").row();
-  kb.text("❓ Help", "help").text("🔄 Refresh", "menu_home").row();
+  kb.text("« 🏠 Back to home", "menu_home").row();
   return kb;
 }
 
@@ -56,7 +90,15 @@ function isMainMenuMessage(msg: unknown): boolean {
   const m = msg as { reply_markup?: { inline_keyboard?: { callback_data?: string }[][] } };
   const rows = m.reply_markup?.inline_keyboard;
   if (!rows) return false;
-  return rows.flat().some((b) => b.callback_data === "help" || b.callback_data === "menu_home");
+  return rows.flat().some(
+    (b) =>
+      b.callback_data === "menu_home" ||
+      b.callback_data === "vote_list" ||
+      b.callback_data === "menu_more" ||
+      b.callback_data === "alerts_on" ||
+      b.callback_data === "alerts_off" ||
+      b.callback_data === "help"
+  );
 }
 
 async function getAlertsOn(telegramId: string): Promise<boolean> {
@@ -126,10 +168,9 @@ async function replyVotePicker(ctx: Context) {
   if (disputes.length === 0) {
     await ctx.reply(
       [
-        "<b>uma.vote</b>",
-        "No <b>disputed</b> queries in the index yet.",
+        "📭 <b>No indexed disputes yet</b>",
         "",
-        "Open the Mini App for the full DVM list (including subgraph requests).",
+        "🔍 Use <b>Search or paste link — Vote</b> in the menu, or open the Mini App home.",
       ].join("\n"),
       { parse_mode: "HTML", reply_markup: mainMenuKeyboard(alertsOn) }
     );
@@ -141,22 +182,21 @@ async function replyVotePicker(ctx: Context) {
     const token = encodeVoteFocusToken(d.id);
     const startapp = `vote_${token}`;
     if (startapp.length > 512) continue;
-    const label = `${i + 1}. ${d.source} · ${d.chainId === 137 ? "Poly" : "ETH"}`.slice(0, 64);
+    const chain = d.chainId === 137 ? "💜 Poly" : "⛓ ETH";
+    const label = `🗳 ${i + 1}. ${d.source} · ${chain}`.slice(0, 64);
     kb.webApp(label, webAppUrlWithStartParam(webAppUrl, startapp)).row();
   }
-  kb.webApp("All votes & swap", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-  kb.text("« Main menu", "menu_home").row();
-  const lines = disputes.map(
-    (d, i) => `${i + 1}. ${escapeHtml(d.source)} · chain ${d.chainId}`
-  );
+  kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  kb.text("« 🏠 Home", "menu_home").row();
   await ctx.reply(
     [
-      "<b>Vote from the bot</b>",
-      "Each button opens the <b>Mini App</b> on that dispute — lists prioritize <b>Polygon</b> OO; DVM signing is still on <b>Ethereum</b>.",
+      "📋 <b>Indexed disputes</b>",
       "",
-      ...lines.map((l) => `• ${l}`),
+      "Tap a row to open that dispute in the Mini App (status, charts when available, vote).",
       "",
-      "<i>On-chain signing happens in the Web App (WalletConnect or browser wallet), not inside this chat.</i>",
+      "🔎 Or tap <b>Search / paste</b> to find any Polymarket market.",
+      "",
+      "<i>✍️ Signing is in the Mini App · reveal comes after commit</i>",
     ].join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -221,6 +261,9 @@ async function loadWizardSession(
 /** Private-chat users waiting to send a custom vote price (wei string). */
 const vaultCustomPriceWait = new Map<string, { disputeKey: string }>();
 
+/** After tapping Withdraw ETH/POL — user sends `0xRecipient amountWei|MAX`. */
+const vaultWithdrawWait = new Map<string, { chainId: 1 | 137 }>();
+
 const WEI_1E18 = "1000000000000000000";
 
 type ApiPmOutcome = { label: string; mid: string | null; priceBuy: string | null; priceSell: string | null };
@@ -237,9 +280,14 @@ type ApiDispute = {
   chainId: number;
   proposedPrice?: string | null;
   polymarket: ApiPm;
+  reversalWatch?: boolean;
+  reversalWatchReason?: string | null;
 };
 
-function pmSummary(pm: ApiPm): string {
+function pmSummary(
+  pm: ApiPm,
+  reversal?: { reversalWatch?: boolean; reversalWatchReason?: string | null }
+): string {
   if (!pm) return "";
   const title = pm.title ? escapeHtml(pm.title.slice(0, 80)) : "";
   const prices =
@@ -255,9 +303,18 @@ function pmSummary(pm: ApiPm): string {
     pm.proposedPriceHint != null && pm.proposedPriceHint !== ""
       ? `OO proposed ≈ ${escapeHtml(pm.proposedPriceHint)}`
       : "";
-  const bits = [title && `<i>${title}</i>`, prices && `<small>${prices}</small>`, hint && `<small>${hint}</small>`].filter(
-    Boolean
-  );
+  let rev = "";
+  if (reversal?.reversalWatch) {
+    const raw = reversal.reversalWatchReason?.trim();
+    const short = raw ? escapeHtml(raw.slice(0, 240)) : "CLOB vs OO tension (heuristic).";
+    rev = `<small><b>Reversal watch</b>: ${short}</small>`;
+  }
+  const bits = [
+    title && `<i>${title}</i>`,
+    prices && `<small>${prices}</small>`,
+    hint && `<small>${hint}</small>`,
+    rev || null,
+  ].filter(Boolean);
   return bits.length ? `\n${bits.join("\n")}` : "";
 }
 
@@ -308,28 +365,20 @@ bot.command("help", async (ctx) => {
   const alertsOn = await getAlertsOn(uid);
   await ctx.reply(
     [
-      "<b>Commands</b>",
-      "/start — menu & Mini App",
-      "/votes — disputed queries + Web App buttons to vote",
-      "/wallet — custodial vault (create / export-once / status)",
-      "/vote — commit via vault wizard (API-signed)",
-      "/reveal — reveal a pending vault commit",
-      "/help — this message",
-      "/alerts_on — instant <b>dispute</b> pings + daily digest",
-      "/alerts_off — stop all digests",
+      "❓ <b>Commands</b>",
       "",
-      "<b>Admins (groups)</b>",
-      "/pin_vote_alert — short reminder + pin (needs pin permission)",
-      "/squad — opted-in member count for this group",
+      "🏠 <code>/start</code> — home menu",
+      "🔍 Mini App → paste Polymarket URL / search (same as menu <b>Search or paste link</b>)",
+      "📋 <code>/votes</code> — quick-open indexed disputes",
+      "🔐 <code>/wallet</code> — vault; <code>/wallet balances</code>; <code>/wallet withdraw eth|poly</code> then <code>0x… amountWei|MAX</code>; deposit = send to vault addr",
+      "🧙 <code>/vote</code> · <code>/reveal</code> — vault commit / reveal wizard",
+      "🔔 <code>/alerts_on</code> · <code>/alerts_off</code> — dispute pings + digest",
       "",
-      "<b>Chains</b>",
-      "Dispute picks prioritize <b>Polygon</b> OO (prediction markets). DVM signing is on <b>Ethereum</b> (VotingV2).",
+      "👮 <b>Groups</b> <code>/pin_vote_alert</code> · <code>/squad</code>",
       "",
-      "<b>Custody</b>",
-      "Vault keys are encrypted on the server; the operator can sign allowed txs. Not a hardware wallet.",
+      "💜 Disputes often on <b>Polygon</b> OO · ⛓ DVM vote on <b>Ethereum</b>",
       "",
-      "<b>Coming soon</b>",
-      "Discord login — connect Discord to auto-post vote reminders in your server.",
+      "<i>Vault custody: operator can sign allowed txs — not a hardware wallet.</i>",
     ].join("\n"),
     { parse_mode: "HTML", reply_markup: mainMenuKeyboard(alertsOn) }
   );
@@ -403,22 +452,42 @@ bot.callbackQuery("help", async (ctx) => {
   const uid = String(ctx.from?.id ?? "");
   const alertsOn = await getAlertsOn(uid);
   await ctx.reply(
-    "Use /help for full commands. Mini App: Swap, Votes, Account. Try /votes to vote via Web App buttons.",
-    { reply_markup: mainMenuKeyboard(alertsOn) }
+    "❓ Type <code>/help</code> for the full list — or use 🔍 <b>Search or paste link</b> in the menu.",
+    { parse_mode: "HTML", reply_markup: mainMenuKeyboard(alertsOn) }
   );
 });
 
 bot.callbackQuery("menu_home", async (ctx) => {
   try {
     await refreshMainMenuFromCallback(ctx);
-    await ctx.answerCallbackQuery({ text: "Main menu" });
+    await ctx.answerCallbackQuery({ text: "🏠 Home" });
   } catch {
     await ctx.answerCallbackQuery({ text: "Use /start", show_alert: true });
   }
 });
 
+bot.callbackQuery("menu_more", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const msg = ctx.callbackQuery?.message;
+  if (!msg) return;
+  try {
+    if ("photo" in msg && msg.photo?.length) {
+      await ctx.editMessageCaption({
+        caption: morePanelCaptionHtml(),
+        parse_mode: "HTML",
+        reply_markup: moreMenuKeyboard(),
+      });
+    } else {
+      await ctx.editMessageText(morePanelCaptionHtml(), { parse_mode: "HTML", reply_markup: moreMenuKeyboard() });
+    }
+  } catch (e) {
+    console.warn("menu_more edit failed", e);
+    await ctx.reply(morePanelCaptionHtml(), { parse_mode: "HTML", reply_markup: moreMenuKeyboard() });
+  }
+});
+
 bot.callbackQuery("vote_list", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Loading disputes…" });
+  await ctx.answerCallbackQuery({ text: "📋 Loading…" });
   await replyVotePicker(ctx);
 });
 
@@ -442,18 +511,18 @@ bot.command("pin_vote_alert", async (ctx) => {
     return;
   }
   const kb = new InlineKeyboard()
-    .url("Open voter dApp", "https://vote.umaproject.org/")
+    .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
     .row();
   if (webAppUrl) {
-    kb.webApp("Open uma.vote Mini App", webAppUrl).row();
-    kb.webApp("Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("📱 Mini App home", webAppUrl).row();
+    kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
   }
   const msg = await ctx.reply(
     [
-      "<b>UMA DVM vote window</b>",
-      "Commit and reveal on <b>vote.umaproject.org</b> (Ethereum DVM).",
+      "🗳 <b>UMA DVM vote window</b>",
+      "Commit / reveal on <b>vote.umaproject.org</b> (Ethereum).",
       "",
-      "Mini App highlights Polygon disputes and helps you swap into UMA on Ethereum.",
+      "🔍 Mini App: paste a Polymarket link or search, then vote.",
     ].join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -521,10 +590,10 @@ async function replyVaultStatus(ctx: Context, uid: string) {
         ]
       : [];
   const lines = [
-    "<b>Custodial vault</b>",
+    "🔐 <b>Custodial vault</b>",
     "",
     st.address
-      ? `Address:\n<code>${escapeHtml(st.address)}</code>`
+      ? `📬 Address:\n<code>${escapeHtml(st.address)}</code>`
       : "<i>No vault yet.</i> Tap <b>Create</b> or use <code>/wallet create</code>.",
     ...depositBlock,
     "",
@@ -541,13 +610,16 @@ async function replyVaultStatus(ctx: Context, uid: string) {
     "<b>Custody warning:</b> the operator can sign txs this product allows; DB + master key compromise drains the wallet.",
   ];
   const kb = new InlineKeyboard();
-  if (!st.address) kb.text("Create vault", "vault_create").row();
+  if (!st.address) kb.text("➕ Create vault", "vault_create").row();
   else {
-    kb.text("Refresh", "vault_menu").row();
-    if (!st.exportedOnce) kb.text("Export key (once)", "vault_export").row();
+    kb.text("🔄 Refresh", "vault_menu").row();
+    if (!st.exportedOnce) kb.text("🔑 Export key (once)", "vault_export").row();
   }
-  kb.text("Vote wizard", "vote_vault_start").text("Reveal", "reveal_vault_start").row();
-  kb.text("« Main menu", "menu_home").row();
+  kb.text("🧙 Vote wizard", "vote_vault_start").text("🔓 Reveal", "reveal_vault_start").row();
+  if (st.address) {
+    kb.text("💸 Withdraw ETH", "vault_wd_1").text("💸 Withdraw POL", "vault_wd_137").row();
+  }
+  kb.text("« 🏠 Home", "menu_home").row();
   await ctx.reply(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
@@ -576,6 +648,30 @@ bot.callbackQuery("vault_create", async (ctx) => {
     j.created
       ? `<b>Vault created.</b>\n<code>${escapeHtml(j.address)}</code>\n\n<b>Deposit:</b> same address on <b>Ethereum</b> (ETH gas + UMA stake) and <b>Polygon</b> (POL gas). Use /wallet for links.`
       : `<b>Vault already exists.</b>\n<code>${escapeHtml(j.address)}</code>`,
+    { parse_mode: "HTML" }
+  );
+});
+
+bot.callbackQuery(/^vault_wd_(1|137)$/, async (ctx) => {
+  const chainId = ctx.match![1] === "137" ? 137 : 1;
+  await ctx.answerCallbackQuery({ text: chainId === 1 ? "ETH withdraw" : "POL withdraw" });
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  vaultWithdrawWait.set(uid, { chainId });
+  const sym = chainId === 1 ? "ETH" : "POL";
+  await ctx.reply(
+    [
+      `💸 <b>Withdraw ${sym}</b> from your vault`,
+      "",
+      "Send <b>one message</b>:",
+      "<code>0xRecipient amountWei</code>",
+      "",
+      "• <code>amountWei</code> — whole wei integer (e.g. <code>1000000000000000</code>)",
+      "• or <code>MAX</code> to send all native minus a gas reserve",
+      "",
+      "Example: <code>0x742d35Cc6634C0532925a3b844Bc454e4438f44e MAX</code>",
+    ].join("\n"),
     { parse_mode: "HTML" }
   );
 });
@@ -647,6 +743,55 @@ bot.command("wallet", async (ctx) => {
     );
     return;
   }
+  if (sub === "balances") {
+    const r = await internalGet(`/api/internal/vault/balances?telegramId=${encodeURIComponent(uid)}`);
+    if (!r.ok) {
+      await ctx.reply("Could not load balances.");
+      return;
+    }
+    const j = (await r.json()) as { address?: string; ethWei?: string | null; polWei?: string | null };
+    if (!j.address) {
+      await ctx.reply("No vault yet — create one with <code>/wallet create</code> or the Mini App.", {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+    const eth =
+      j.ethWei != null
+        ? `${(Number(j.ethWei) / 1e18).toFixed(6)} ETH`
+        : "—";
+    const pol =
+      j.polWei != null
+        ? `${(Number(j.polWei) / 1e18).toFixed(6)} POL`
+        : "—";
+    await ctx.reply(
+      [
+        "💰 <b>Vault balances</b>",
+        "",
+        `<code>${escapeHtml(j.address)}</code>`,
+        "",
+        `⛓ Ethereum: <b>${escapeHtml(eth)}</b>`,
+        `💜 Polygon: <b>${escapeHtml(pol)}</b>`,
+      ].join("\n"),
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  if (sub === "withdraw" || sub === "wd") {
+    const c = parts[2]?.toLowerCase();
+    const chainId: 1 | 137 =
+      c === "137" || c === "poly" || c === "polygon" || c === "pol" ? 137 : 1;
+    vaultWithdrawWait.set(uid, { chainId });
+    const sym = chainId === 1 ? "ETH" : "POL";
+    await ctx.reply(
+      [
+        `💸 <b>Withdraw ${sym}</b> — reply with one line:`,
+        "<code>0xRecipient amountWei</code> or <code>0xRecipient MAX</code>",
+      ].join("\n"),
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
   await replyVaultStatus(ctx, uid);
 });
 
@@ -670,19 +815,19 @@ async function startVoteWizard(ctx: Context, uid: string) {
   const lines = disputes.map((d, i) => {
     const chain = d.chainId === 137 ? "Poly" : "ETH";
     const head = `${i + 1}. ${escapeHtml(d.source)} · ${chain}`;
-    return `${head}${pmSummary(d.polymarket)}`;
+    return `${head}${pmSummary(d.polymarket, d)}`;
   });
   const kb = new InlineKeyboard();
   for (let i = 0; i < disputes.length; i++) {
     kb.text(String(i + 1), `vw:${i}`).row();
   }
-  kb.text("« Main menu", "menu_home").text("Cancel", "vw_cancel").row();
+  kb.text("« 🏠 Home", "menu_home").text("✖️ Cancel", "vw_cancel").row();
   await ctx.reply(
     [
-      "<b>Vote with vault</b>",
+      "🧙 <b>Vote with vault</b>",
       phaseNote,
       "",
-      "Pick a dispute. Commit uses your <b>custodial</b> wallet on the API (not your browser wallet).",
+      "Pick a dispute — commit uses your <b>custodial</b> API wallet (not your browser wallet).",
       "",
       ...lines,
     ]
@@ -735,14 +880,14 @@ bot.callbackQuery(/^vw:(\d+)$/, async (ctx) => {
     votePick: { keys: [disputeKey], proposedPrices: [proposed] },
   });
   const kb = new InlineKeyboard()
-    .text("Proposed OO price", "vwpr:prop")
+    .text("✅ Proposed OO price", "vwpr:prop")
     .row()
-    .text("0 (wei)", "vwpr:0")
-    .text("1e18", "vwpr:1e18")
+    .text("0️⃣ 0 wei", "vwpr:0")
+    .text("1️⃣ 1e18", "vwpr:1e18")
     .row()
-    .text("Custom (reply)", "vwpr:custom")
+    .text("✏️ Custom (reply)", "vwpr:custom")
     .row()
-    .text("Cancel", "vw_cancel");
+    .text("✖️ Cancel", "vw_cancel");
   const propLine =
     proposed != null && proposed !== ""
       ? `Proposed: <code>${escapeHtml(proposed)}</code>`
@@ -827,9 +972,9 @@ async function startRevealFlow(ctx: Context, uid: string) {
   });
   const kb = new InlineKeyboard();
   for (let i = 0; i < pending.length; i++) kb.text(`Reveal ${i + 1}`, `vr:${i}`).row();
-  kb.text("« Main menu", "menu_home").text("Cancel", "vw_cancel").row();
+  kb.text("« 🏠 Home", "menu_home").text("✖️ Cancel", "vw_cancel").row();
   await ctx.reply(
-    ["<b>Reveal with vault</b>", "", ...lines, "", "Pick which commit to reveal (reveal phase only)."].join("\n"),
+    ["🔓 <b>Reveal with vault</b>", "", ...lines, "", "Pick one to reveal (reveal phase only)."].join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
   );
 }
@@ -879,6 +1024,50 @@ bot.callbackQuery(/^vr:(\d+)$/, async (ctx) => {
 bot.on("message:text", async (ctx, next) => {
   const uid = String(ctx.from?.id ?? "");
   if (!uid || ctx.chat?.type !== "private") return next();
+  const wd = vaultWithdrawWait.get(uid);
+  if (wd && !ctx.message.text.trim().startsWith("/")) {
+    vaultWithdrawWait.delete(uid);
+    if (!(await ensureInternal(ctx))) return;
+    const text = ctx.message.text.trim();
+    const parts = text.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) {
+      await ctx.reply("Use: <code>0xRecipient amountWei</code> or <code>0xRecipient MAX</code>", { parse_mode: "HTML" });
+      return;
+    }
+    const amountTok = parts[parts.length - 1]!;
+    const toRaw = parts.slice(0, -1).join("");
+    if (!/^0x[a-fA-F]{40}$/i.test(toRaw)) {
+      await ctx.reply("Recipient must be one <code>0x</code> + 40 hex chars address.", { parse_mode: "HTML" });
+      return;
+    }
+    const to = toRaw.toLowerCase();
+    const amountWei = amountTok.toUpperCase() === "MAX" ? "MAX" : /^[0-9]+$/.test(amountTok) ? amountTok : null;
+    if (amountWei === null) {
+      await ctx.reply("Amount must be decimal digits (wei) or <code>MAX</code>.", { parse_mode: "HTML" });
+      return;
+    }
+    const r = await internalJson("/api/internal/vault/withdraw", {
+      telegramId: uid,
+      chainId: wd.chainId,
+      to,
+      amountWei,
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      await ctx.reply(`Withdraw failed: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+      return;
+    }
+    const j = (await r.json()) as { txHash: string; chainId: number };
+    const exp =
+      j.chainId === 137 ? `https://polygonscan.com/tx/${escapeHtml(j.txHash)}` : `https://etherscan.io/tx/${escapeHtml(j.txHash)}`;
+    await ctx.reply(
+      [`✅ <b>Withdraw sent</b>`, "", `<code>${escapeHtml(j.txHash)}</code>`, "", `<a href="${exp}">View on explorer</a>`].join(
+        "\n"
+      ),
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
   const wait = vaultCustomPriceWait.get(uid);
   if (!wait) return next();
   const text = ctx.message.text.trim();
@@ -927,9 +1116,12 @@ async function runDisputeBatchAlerts() {
   const { telegramIds } = (await sub.json()) as { telegramIds: string[] };
   if (!telegramIds?.length) return;
   const kb = new InlineKeyboard()
-    .url("Open voter dApp", "https://vote.umaproject.org/")
+    .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
     .row();
-  if (webAppUrl) kb.webApp("Open Mini App", webAppUrl);
+  if (webAppUrl) {
+    kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("📱 Mini App home", webAppUrl).row();
+  }
   for (const id of telegramIds) {
     try {
       await bot.api.sendMessage(id, data.batch.html, {
@@ -962,20 +1154,24 @@ async function runDigestOnce() {
     ? data.preview.map((p) => `• ${p}`).join("\n")
     : "• (see voter dApp)";
   const kb = new InlineKeyboard()
-    .url("Open voter dApp", "https://vote.umaproject.org/")
+    .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
     .row();
-  if (webAppUrl) kb.webApp("Open Mini App", webAppUrl);
+  if (webAppUrl) {
+    kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("📱 Mini App home", webAppUrl).row();
+  }
   for (const id of data.telegramIds) {
     try {
       await bot.api.sendMessage(
         id,
         [
-          "<b>UMA voting reminder</b>",
+          "⏰ <b>UMA voting reminder</b>",
           "Unresolved DVM price requests are live.",
           "",
           lines,
           "",
-          "<b>Next:</b> stake if needed, then commit → reveal on the official dApp.",
+          "👉 <b>Next:</b> stake if needed — then commit → reveal.",
+          "🔍 Or paste a Polymarket link in the Mini App to find your market.",
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: kb }
       );
@@ -999,11 +1195,22 @@ setInterval(() => {
   runDigestOnce().catch(console.error);
 }, digestMs);
 
-bot.start({
-  onStart: (info) => {
-    console.log(`Bot @${info.username} running (polling). Mini App: ${webAppUrl || "(set WEB_APP_URL)"}`);
-    if (botUsername && info.username !== botUsername) {
-      console.warn(`PUBLIC_BOT_USERNAME (${botUsername}) does not match ${info.username}`);
-    }
-  },
+async function main() {
+  await clearWebhookForPolling();
+  await bot.start({
+    onStart: (info) => {
+      console.log(`Bot @${info.username} running (polling). Mini App: ${webAppUrl || "(set WEB_APP_URL)"}`);
+      console.log(`API_PUBLIC_URL=${apiUrl}`);
+      if (!internalSecret) console.warn("INTERNAL_API_SECRET is empty — /wallet, /vote, alerts will fail");
+      if (!webAppUrl) console.warn("WEB_APP_URL is empty — Web App menu buttons will be missing");
+      if (botUsername && info.username !== botUsername) {
+        console.warn(`PUBLIC_BOT_USERNAME (${botUsername}) does not match ${info.username}`);
+      }
+    },
+  });
+}
+
+main().catch((e) => {
+  console.error("Bot failed to start:", e);
+  process.exit(1);
 });
