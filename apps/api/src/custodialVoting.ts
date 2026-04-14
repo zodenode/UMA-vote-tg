@@ -12,6 +12,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { mainnet } from "viem/chains";
 import crypto from "node:crypto";
 import { MAINNET } from "./contracts.js";
+import { toHttpRpcUrl } from "./disputePoll.js";
 import { decryptPrivateKey } from "./vaultCrypto.js";
 import { getDvmTiming } from "./dvmTiming.js";
 
@@ -180,7 +181,7 @@ export async function custodialCommitVote(opts: {
   const walletClient = createWalletClient({
     account,
     chain: mainnet,
-    transport: http(opts.ethRpcUrl),
+    transport: http(toHttpRpcUrl(opts.ethRpcUrl)),
   });
 
   const identifier = identifierToHex(opts.dispute.identifier);
@@ -285,7 +286,7 @@ export async function custodialRevealVote(opts: {
   const walletClient = createWalletClient({
     account,
     chain: mainnet,
-    transport: http(opts.ethRpcUrl),
+    transport: http(toHttpRpcUrl(opts.ethRpcUrl)),
   });
 
   const identifier = identifierToHex(row.identifier);
