@@ -1,6 +1,8 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import { createHash, randomBytes } from "node:crypto";
 import type { Hex, PublicClient } from "viem";
+import { getAddress, isAddress, verifyMessage } from "viem";
 import { openDb, getOrCreateUser } from "./db.js";
 import { verifyInitData, parseUserFromInitData } from "./telegramAuth.js";
 import { type PriceRequestSummary } from "./umaSubgraph.js";
@@ -32,7 +34,7 @@ import {
 } from "./polymarketEnrichment.js";
 import { polymarketSearch } from "./polymarketSearch.js";
 import { fetchPolymarketPriceHistory } from "./polymarketPricesHistory.js";
-import { decodeVoteFocusToken } from "./voteFocusToken.js";
+import { decodeVoteFocusToken, encodeVoteFocusToken } from "./voteFocusToken.js";
 import {
   computePolymarketReversalWatch,
   type ReversalWatchResult,
@@ -54,6 +56,16 @@ const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
 const ethRpcUrl = process.env.ETH_RPC_URL ?? "";
 const polygonRpcUrl = process.env.POLYGON_RPC_URL ?? "";
+
+const petitionMaxTitleChars = Math.min(200, Math.max(40, Number(process.env.PETITION_MAX_TITLE_CHARS ?? "120")));
+const petitionMaxBodyChars = Math.min(8000, Math.max(200, Number(process.env.PETITION_MAX_BODY_CHARS ?? "2000")));
+const petitionMaxCommentChars = Math.min(500, Math.max(0, Number(process.env.PETITION_MAX_COMMENT_CHARS ?? "200")));
+const petitionCreatesPerDay = Math.min(50, Math.max(1, Number(process.env.PETITION_CREATES_PER_DAY ?? "8")));
+const petitionExportIncludesUsername =
+  process.env.PETITION_EXPORT_INCLUDES_USERNAME === "1" || process.env.PETITION_EXPORT_INCLUDES_USERNAME === "true";
+
+const PETITION_LEGAL_NOTE =
+  "Community expression only — not legal advice. Signing does not create an attorney–client relationship or a lawsuit. Operators do not endorse petition claims.";
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -364,6 +376,8 @@ app.get<{
     minBondWei?: string;
     limit?: string;
     chain?: string;
+    /** When "1", skip active price-request subgraph/RPC + DVM timing — faster for landing dispute lists only. */
+    omitRequests?: string;
   };
   }>(
   "/api/votes",
@@ -384,12 +398,17 @@ app.get<{
     const chainQ = req.query.chain;
     const chainFilter =
       chainQ === "1" || chainQ === "137" ? (chainQ as "1" | "137") : undefined;
-    const { requests, subgraphError, requestsSource } = await loadActivePriceRequests(
-      graphKey,
-      ethClient,
-      20
-    );
-    const dvm = ethClient ? await getDvmTiming(ethClient) : null;
+    const omitRequests = req.query.omitRequests === "1" || req.query.omitRequests === "true";
+    let requests: PriceRequestSummary[] = [];
+    let subgraphError: string | undefined;
+    let requestsSource: "subgraph" | "rpc" | undefined;
+    if (!omitRequests) {
+      const loaded = await loadActivePriceRequests(graphKey, ethClient, 20);
+      requests = loaded.requests;
+      subgraphError = loaded.subgraphError;
+      requestsSource = loaded.requestsSource;
+    }
+    const dvm = omitRequests || !ethClient ? null : await getDvmTiming(ethClient);
     const rows = loadFilteredDisputes({
       source: req.query.source,
       topic: req.query.topic,
@@ -398,7 +417,8 @@ app.get<{
       limit,
     });
     const currentDvmRound = dvm?.roundId ?? null;
-    const pmMap = await enrichDisputesForApi(rows, 15);
+    const enrichCap = Math.min(Math.max(limit, 1), rows.length || 1);
+    const pmMap = await enrichDisputesForApi(rows, enrichCap);
     const disputes = rows.map((r) => {
       const polymarket = pmMap.get(r.dispute_key) ?? null;
       return {
@@ -548,6 +568,27 @@ app.post<{
 });
 
 app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { chatId?: string; enabled?: boolean; title?: string | null };
+}>("/api/internal/group-broadcast-set", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const chatId = req.body.chatId;
+  if (!chatId || typeof req.body.enabled !== "boolean") {
+    return reply.status(400).send({ error: "chatId and enabled (boolean) required" });
+  }
+  const title = req.body.title ?? null;
+  db.prepare(
+    `INSERT INTO group_broadcasts (chat_id, enabled, title, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(chat_id) DO UPDATE SET
+       enabled = excluded.enabled,
+       title = COALESCE(excluded.title, group_broadcasts.title),
+       updated_at = datetime('now')`
+  ).run(chatId, req.body.enabled ? 1 : 0, title);
+  return { ok: true };
+});
+
+app.post<{
   Body: { initData?: string; chatId: string; title?: string; delta: 1 | -1 };
 }>("/api/groups/alerts-member", async (req, reply) => {
   const v = requireInitData(req.body?.initData);
@@ -577,6 +618,546 @@ app.get<{ Params: { code: string } }>("/api/referrals/:code", async (req, reply)
     | undefined;
   if (!u) return reply.status(404).send({ error: "Unknown code" });
   return { ok: true };
+});
+
+function newPetitionId(): string {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const id = randomBytes(12).toString("hex");
+    const exists = db.prepare(`SELECT 1 FROM petitions WHERE id = ?`).get(id);
+    if (!exists) return id;
+  }
+  throw new Error("Could not allocate petition id");
+}
+
+const petitionSignTtlMs = 15 * 60 * 1000;
+const petitionMaxImageUrlLen = 2048;
+
+function normalizeLinkedEthAddress(raw: string): `0x${string}` | null {
+  const s = raw.trim();
+  if (!isAddress(s)) return null;
+  try {
+    return getAddress(s) as `0x${string}`;
+  } catch {
+    return null;
+  }
+}
+
+function validatePetitionImageUrl(raw: string | null | undefined): string | null {
+  const u = (raw ?? "").trim();
+  if (!u) return null;
+  if (u.length > petitionMaxImageUrlLen) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(u);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  return u;
+}
+
+function normalizeConditionId(raw: string | null | undefined): string | null {
+  const s = (raw ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (!/^0x[a-f0-9]{64}$/.test(s)) return null;
+  return s;
+}
+
+function issuedAtFresh(issuedAt: string): boolean {
+  const t = Date.parse(issuedAt);
+  if (!Number.isFinite(t)) return false;
+  return Math.abs(Date.now() - t) <= petitionSignTtlMs;
+}
+
+function buildWalletLinkMessage(telegramId: string, issuedAt: string): string {
+  return `UMA Vote TG — verify wallet ownership\nTelegram user ID: ${telegramId}\nIssued at (UTC): ${issuedAt}`;
+}
+
+function buildPetitionSignMessage(telegramId: string, petitionId: string, issuedAt: string): string {
+  return `UMA Vote TG — sign community petition\nPetition ID: ${petitionId}\nTelegram user ID: ${telegramId}\nIssued at (UTC): ${issuedAt}`;
+}
+
+function getLinkedWalletRow(telegramId: string): { address: string } | undefined {
+  return db.prepare(`SELECT address FROM user_linked_wallets WHERE telegram_id = ?`).get(telegramId) as
+    | { address: string }
+    | undefined;
+}
+
+function signerExportRef(petitionId: string, signerTelegramId: string): string {
+  if (petitionExportIncludesUsername) return signerTelegramId;
+  return createHash("sha256").update(`petition|${petitionId}|${signerTelegramId}`).digest("hex").slice(0, 24);
+}
+
+function csvEscapeCell(s: string): string {
+  const t = s.replace(/\r\n/g, "\n");
+  if (/[",\n]/.test(t)) return `"${t.replace(/"/g, '""')}"`;
+  return t;
+}
+
+function petitionSignatureCounts(petitionId: string): { total: number; verified: number } {
+  const total = (
+    db.prepare(`SELECT COUNT(*) as c FROM petition_signatures WHERE petition_id = ?`).get(petitionId) as {
+      c: number;
+    }
+  ).c;
+  const verified = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as c FROM petition_signatures WHERE petition_id = ?
+         AND wallet_address IS NOT NULL AND TRIM(wallet_address) != ''
+         AND wallet_signature IS NOT NULL AND TRIM(wallet_signature) != ''`
+      )
+      .get(petitionId) as { c: number }
+  ).c;
+  return { total, verified };
+}
+
+function petitionWalletSignCore(
+  telegramId: string,
+  petitionId: string,
+  comment: string | null,
+  walletAddress: `0x${string}`,
+  walletMessage: string,
+  walletSignature: Hex
+): { ok: true; signatureCount: number; verifiedSignatureCount: number } | { status: number; error: string } {
+  getOrCreateUser(db, telegramId, null);
+  const row = db.prepare(`SELECT id, hidden, closed_at FROM petitions WHERE id = ?`).get(petitionId) as
+    | { id: string; hidden: number; closed_at: string | null }
+    | undefined;
+  if (!row) return { status: 404, error: "Petition not found" };
+  if (row.hidden) return { status: 403, error: "Petition is hidden" };
+  if (row.closed_at) return { status: 403, error: "Petition is closed" };
+  const linked = getLinkedWalletRow(telegramId);
+  if (!linked || linked.address.toLowerCase() !== walletAddress.toLowerCase()) {
+    return { status: 403, error: "Wallet not linked to this Telegram account" };
+  }
+  const okSig = verifyMessage({
+    address: walletAddress,
+    message: walletMessage,
+    signature: walletSignature,
+  });
+  if (!okSig) return { status: 400, error: "Invalid wallet signature" };
+  db.prepare(
+    `INSERT INTO petition_signatures (petition_id, signer_telegram_id, comment, signed_at, wallet_address, wallet_message, wallet_signature)
+     VALUES (?, ?, ?, datetime('now'), ?, ?, ?)
+     ON CONFLICT(petition_id, signer_telegram_id) DO UPDATE SET
+       comment = COALESCE(excluded.comment, petition_signatures.comment),
+       signed_at = datetime('now'),
+       wallet_address = excluded.wallet_address,
+       wallet_message = excluded.wallet_message,
+       wallet_signature = excluded.wallet_signature`
+  ).run(petitionId, telegramId, comment, walletAddress, walletMessage, walletSignature);
+  const { total, verified } = petitionSignatureCounts(petitionId);
+  return { ok: true, signatureCount: total, verifiedSignatureCount: verified };
+}
+
+type PetitionRow = {
+  id: string;
+  creator_telegram_id: string;
+  title: string;
+  body: string;
+  hidden: number;
+  created_at: string;
+  closed_at: string | null;
+  image_url: string | null;
+  dispute_key: string | null;
+  condition_id: string | null;
+};
+
+function buildPetitionResponse(row: PetitionRow, viewerTelegramId: string | null) {
+  const { total: signatureCount, verified: verifiedSignatureCount } = petitionSignatureCounts(row.id);
+  const viewerIsCreator = Boolean(viewerTelegramId && viewerTelegramId === row.creator_telegram_id);
+  const disputeFocusToken = row.dispute_key ? encodeVoteFocusToken(row.dispute_key) : null;
+  const polymarketUrl = row.condition_id
+    ? `https://polymarket.com/condition/${encodeURIComponent(row.condition_id)}`
+    : null;
+  if (row.hidden && !viewerIsCreator) {
+    return {
+      id: row.id,
+      hidden: true,
+      title: "This petition is unavailable",
+      body: null as string | null,
+      imageUrl: null as string | null,
+      disputeKey: null as string | null,
+      conditionId: null as string | null,
+      disputeFocusToken: null as string | null,
+      polymarketUrl: null as string | null,
+      signatureCount,
+      verifiedSignatureCount,
+      createdAt: row.created_at,
+      legalNote: PETITION_LEGAL_NOTE,
+    };
+  }
+  return {
+    id: row.id,
+    hidden: Boolean(row.hidden),
+    title: row.title,
+    body: row.body,
+    imageUrl: row.image_url ?? null,
+    disputeKey: row.dispute_key ?? null,
+    conditionId: row.condition_id ?? null,
+    disputeFocusToken,
+    polymarketUrl,
+    signatureCount,
+    verifiedSignatureCount,
+    createdAt: row.created_at,
+    legalNote: PETITION_LEGAL_NOTE,
+  };
+}
+
+app.get<{ Params: { id: string }; Querystring: { initData?: string } }>("/api/petitions/:id", async (req, reply) => {
+  const rawId = (req.params.id ?? "").trim().toLowerCase();
+  if (!rawId || rawId.length > 64 || !/^[a-f0-9]+$/.test(rawId)) {
+    return reply.status(400).send({ error: "Invalid petition id" });
+  }
+  const row = db.prepare(`SELECT * FROM petitions WHERE id = ?`).get(rawId) as PetitionRow | undefined;
+  if (!row) return reply.status(404).send({ error: "Not found" });
+  let viewerId: string | null = null;
+  const initData = typeof req.query.initData === "string" ? req.query.initData : undefined;
+  if (initData && botToken && verifyInitData(initData, botToken)) {
+    const u = parseUserFromInitData(initData);
+    if (u?.id) viewerId = String(u.id);
+  }
+  return buildPetitionResponse(row, viewerId);
+});
+
+app.get("/api/petitions/active", async () => {
+  const rows = db
+    .prepare(
+      `SELECT p.* FROM petitions p
+       WHERE p.hidden = 0 AND p.closed_at IS NULL
+       ORDER BY datetime(p.created_at) DESC
+       LIMIT 80`
+    )
+    .all() as PetitionRow[];
+  return {
+    petitions: rows.map((r) => {
+      const pub = buildPetitionResponse(r, null);
+      return {
+        id: pub.id,
+        title: pub.title,
+        hidden: pub.hidden,
+        imageUrl: pub.imageUrl,
+        disputeKey: pub.disputeKey,
+        conditionId: pub.conditionId,
+        disputeFocusToken: pub.disputeFocusToken,
+        polymarketUrl: pub.polymarketUrl,
+        signatureCount: pub.signatureCount,
+        verifiedSignatureCount: pub.verifiedSignatureCount,
+        createdAt: pub.createdAt,
+      };
+    }),
+  };
+});
+
+app.post<{ Body: { initData?: string; petitionId?: string } }>("/api/me/petition/fetch", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
+  if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
+    return reply.status(400).send({ error: "petitionId required" });
+  }
+  const row = db.prepare(`SELECT * FROM petitions WHERE id = ?`).get(petitionId) as PetitionRow | undefined;
+  if (!row) return reply.status(404).send({ error: "Not found" });
+  return buildPetitionResponse(row, v.userId);
+});
+
+app.post<{ Body: { initData?: string } }>("/api/me/wallet/status", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  getOrCreateUser(db, v.userId, null);
+  const row = getLinkedWalletRow(v.userId);
+  return { linked: Boolean(row), address: row?.address ?? null };
+});
+
+app.post<{ Body: { initData?: string } }>("/api/me/wallet/link-challenge", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  getOrCreateUser(db, v.userId, null);
+  const issuedAt = new Date().toISOString();
+  const message = buildWalletLinkMessage(v.userId, issuedAt);
+  return { message, issuedAt };
+});
+
+app.post<{
+  Body: { initData?: string; message?: string; signature?: Hex; issuedAt?: string };
+}>("/api/me/wallet/link", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const message = (req.body?.message ?? "").trim();
+  const signature = (req.body?.signature ?? "").trim() as Hex;
+  const issuedAt = (req.body?.issuedAt ?? "").trim();
+  if (!message || !signature || !issuedAt) {
+    return reply.status(400).send({ error: "message, signature, and issuedAt required" });
+  }
+  if (!issuedAtFresh(issuedAt)) return reply.status(400).send({ error: "issuedAt expired or invalid" });
+  const expected = buildWalletLinkMessage(v.userId, issuedAt);
+  if (message !== expected) return reply.status(400).send({ error: "message mismatch" });
+  const recovered = await verifyMessage({
+    message,
+    signature,
+  }).catch(() => false);
+  if (!recovered) return reply.status(400).send({ error: "Invalid signature" });
+  const addr = normalizeLinkedEthAddress(String(recovered));
+  if (!addr) return reply.status(400).send({ error: "Could not recover address" });
+  getOrCreateUser(db, v.userId, null);
+  const taken = db
+    .prepare(
+      `SELECT telegram_id FROM user_linked_wallets WHERE LOWER(address) = LOWER(?) AND telegram_id != ?`
+    )
+    .get(addr, v.userId) as { telegram_id: string } | undefined;
+  if (taken) {
+    return reply.status(409).send({ error: "That wallet is already linked to another Telegram account" });
+  }
+  db.prepare(
+    `INSERT INTO user_linked_wallets (telegram_id, address, linked_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(telegram_id) DO UPDATE SET address = excluded.address, linked_at = datetime('now')`
+  ).run(v.userId, addr);
+  return { ok: true, address: addr };
+});
+
+app.post<{ Body: { initData?: string; petitionId?: string } }>(
+  "/api/me/petition/sign-challenge",
+  async (req, reply) => {
+    const v = requireInitData(req.body?.initData);
+    if (!v.ok) return reply.status(v.status).send({ error: v.message });
+    const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
+    if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
+      return reply.status(400).send({ error: "petitionId required" });
+    }
+    const linked = getLinkedWalletRow(v.userId);
+    if (!linked) {
+      return reply.status(400).send({ error: "Link an Ethereum wallet in the Mini App before signing" });
+    }
+    const prow = db.prepare(`SELECT id, hidden, closed_at FROM petitions WHERE id = ?`).get(petitionId) as
+      | { id: string; hidden: number; closed_at: string | null }
+      | undefined;
+    if (!prow) return reply.status(404).send({ error: "Petition not found" });
+    if (prow.hidden) return reply.status(403).send({ error: "Petition is hidden" });
+    if (prow.closed_at) return reply.status(403).send({ error: "Petition is closed" });
+    const issuedAt = new Date().toISOString();
+    const message = buildPetitionSignMessage(v.userId, petitionId, issuedAt);
+    return { message, issuedAt, linkedAddress: linked.address };
+  }
+);
+
+app.post<{
+  Body: {
+    initData?: string;
+    petitionId?: string;
+    message?: string;
+    signature?: Hex;
+    issuedAt?: string;
+    comment?: string | null;
+  };
+}>("/api/me/petition/sign", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
+  if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
+    return reply.status(400).send({ error: "petitionId required" });
+  }
+  const message = (req.body?.message ?? "").trim();
+  const signature = (req.body?.signature ?? "").trim() as Hex;
+  const issuedAt = (req.body?.issuedAt ?? "").trim();
+  if (!message || !signature || !issuedAt) {
+    return reply.status(400).send({ error: "message, signature, and issuedAt required" });
+  }
+  if (!issuedAtFresh(issuedAt)) return reply.status(400).send({ error: "issuedAt expired or invalid" });
+  const expected = buildPetitionSignMessage(v.userId, petitionId, issuedAt);
+  if (message !== expected) return reply.status(400).send({ error: "message mismatch" });
+  let comment = (req.body?.comment ?? "").trim() || null;
+  if (comment && comment.length > petitionMaxCommentChars) {
+    return reply.status(400).send({ error: "comment too long" });
+  }
+  const recovered = await verifyMessage({
+    message,
+    signature,
+  }).catch(() => false);
+  if (!recovered) return reply.status(400).send({ error: "Invalid signature" });
+  const walletAddress = normalizeLinkedEthAddress(String(recovered));
+  if (!walletAddress) return reply.status(400).send({ error: "Could not recover address" });
+  const out = petitionWalletSignCore(v.userId, petitionId, comment, walletAddress, message, signature);
+  if ("error" in out) return reply.status(out.status).send({ error: out.error });
+  return {
+    ok: true,
+    signatureCount: out.signatureCount,
+    verifiedSignatureCount: out.verifiedSignatureCount,
+    legalNote: PETITION_LEGAL_NOTE,
+  };
+});
+
+app.post<{
+  Body: {
+    initData?: string;
+    title?: string;
+    body?: string;
+    imageUrl?: string;
+    disputeKey?: string;
+    conditionId?: string;
+  };
+}>("/api/me/petition/create", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  const title = (req.body?.title ?? "").trim();
+  const body = (req.body?.body ?? "").trim();
+  const imageUrl = validatePetitionImageUrl(req.body?.imageUrl);
+  const disputeKeyRaw = (req.body?.disputeKey ?? "").trim() || null;
+  const conditionNorm = normalizeConditionId(req.body?.conditionId);
+  if (!title || !body) return reply.status(400).send({ error: "title and body required" });
+  if (!imageUrl) return reply.status(400).send({ error: "A valid https imageUrl is required" });
+  if (title.length > petitionMaxTitleChars || body.length > petitionMaxBodyChars) {
+    return reply.status(400).send({ error: "title or body too long" });
+  }
+  let disputeKey: string | null = disputeKeyRaw;
+  if (disputeKey) {
+    const dr = loadDisputeRowByKey(disputeKey);
+    if (!dr) return reply.status(400).send({ error: "disputeKey not found in indexed disputes" });
+  }
+  let conditionId: string | null = conditionNorm;
+  if (conditionId && disputeKey) {
+    const byC = findDisputeRowByConditionId(conditionId);
+    if (!byC || byC.dispute_key !== disputeKey) {
+      return reply.status(400).send({ error: "conditionId does not match the selected dispute" });
+    }
+  } else if (conditionId && !disputeKey) {
+    const byC = findDisputeRowByConditionId(conditionId);
+    if (!byC) {
+      return reply.status(400).send({ error: "conditionId not found on an indexed Polymarket dispute" });
+    }
+    disputeKey = byC.dispute_key;
+  }
+  getOrCreateUser(db, v.userId, null);
+  const since = db
+    .prepare(
+      `SELECT COUNT(*) as c FROM petitions WHERE creator_telegram_id = ? AND datetime(created_at) > datetime('now', '-24 hours')`
+    )
+    .get(v.userId) as { c: number };
+  if (since.c >= petitionCreatesPerDay) {
+    return reply.status(429).send({ error: "Daily petition create limit reached" });
+  }
+  const id = newPetitionId();
+  db.prepare(
+    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at, image_url, dispute_key, condition_id)
+     VALUES (?, ?, ?, ?, 0, datetime('now'), ?, ?, ?)`
+  ).run(id, v.userId, title, body, imageUrl, disputeKey, conditionId);
+  return { ok: true, id, legalNote: PETITION_LEGAL_NOTE };
+});
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; title?: string; body?: string };
+}>("/api/internal/petition/create", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const telegramId = (req.body?.telegramId ?? "").trim();
+  const title = (req.body?.title ?? "").trim();
+  const body = (req.body?.body ?? "").trim();
+  if (!telegramId) return reply.status(400).send({ error: "telegramId required" });
+  if (!title || !body) return reply.status(400).send({ error: "title and body required" });
+  if (title.length > petitionMaxTitleChars || body.length > petitionMaxBodyChars) {
+    return reply.status(400).send({ error: "title or body too long" });
+  }
+  getOrCreateUser(db, telegramId, null);
+  const since = db
+    .prepare(
+      `SELECT COUNT(*) as c FROM petitions WHERE creator_telegram_id = ? AND datetime(created_at) > datetime('now', '-24 hours')`
+    )
+    .get(telegramId) as { c: number };
+  if (since.c >= petitionCreatesPerDay) {
+    return reply.status(429).send({ error: "Daily petition create limit reached" });
+  }
+  const id = newPetitionId();
+  db.prepare(
+    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at) VALUES (?, ?, ?, ?, 0, datetime('now'))`
+  ).run(id, telegramId, title, body);
+  return { ok: true, id, legalNote: PETITION_LEGAL_NOTE };
+});
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; petitionId?: string; comment?: string | null };
+}>("/api/internal/petition/sign", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const telegramId = (req.body?.telegramId ?? "").trim();
+  const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
+  let comment = (req.body?.comment ?? "").trim() || null;
+  if (!telegramId || !petitionId) return reply.status(400).send({ error: "telegramId and petitionId required" });
+  if (!/^[a-f0-9]+$/.test(petitionId)) return reply.status(400).send({ error: "Invalid petitionId" });
+  if (comment && comment.length > petitionMaxCommentChars) {
+    return reply.status(400).send({ error: "comment too long" });
+  }
+  const out = petitionSignCore(telegramId, petitionId, comment);
+  if ("error" in out) return reply.status(out.status).send({ error: out.error });
+  return { ok: true, signatureCount: out.signatureCount, legalNote: PETITION_LEGAL_NOTE };
+});
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { telegramId?: string; petitionId?: string };
+}>("/api/internal/petition/report", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const telegramId = (req.body?.telegramId ?? "").trim();
+  const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
+  if (!telegramId || !petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
+    return reply.status(400).send({ error: "telegramId and petitionId required" });
+  }
+  getOrCreateUser(db, telegramId, null);
+  const p = db.prepare(`SELECT id FROM petitions WHERE id = ?`).get(petitionId);
+  if (!p) return reply.status(404).send({ error: "Petition not found" });
+  const dup = db
+    .prepare(`SELECT 1 FROM petition_reports WHERE petition_id = ? AND reporter_telegram_id = ?`)
+    .get(petitionId, telegramId);
+  if (dup) return { ok: true, duplicate: true };
+  db.prepare(
+    `INSERT INTO petition_reports (petition_id, reporter_telegram_id, created_at) VALUES (?, ?, datetime('now'))`
+  ).run(petitionId, telegramId);
+  return { ok: true };
+});
+
+app.post<{
+  Headers: Record<string, string | string[] | undefined>;
+  Body: { petitionId?: string; hidden?: boolean };
+}>("/api/internal/petition/set-hidden", async (req, reply) => {
+  if (!requireInternal(req, reply)) return;
+  const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
+  if (!petitionId || !/^[a-f0-9]+$/.test(petitionId) || typeof req.body.hidden !== "boolean") {
+    return reply.status(400).send({ error: "petitionId and hidden (boolean) required" });
+  }
+  const r = db.prepare(`UPDATE petitions SET hidden = ? WHERE id = ?`).run(req.body.hidden ? 1 : 0, petitionId);
+  if (r.changes === 0) return reply.status(404).send({ error: "Not found" });
+  return { ok: true };
+});
+
+app.get<{ Querystring: { secret?: string; petitionId?: string } }>("/api/cron/petition-export", async (req, reply) => {
+  if (!assertCron(req, reply)) return;
+  const petitionId = (req.query.petitionId ?? "").trim().toLowerCase();
+  if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
+    return reply.status(400).send({ error: "petitionId query required" });
+  }
+  const row = db.prepare(`SELECT id FROM petitions WHERE id = ?`).get(petitionId);
+  if (!row) return reply.status(404).send({ error: "Not found" });
+  const rows = db
+    .prepare(
+      `SELECT petition_id, signer_telegram_id, comment, signed_at FROM petition_signatures WHERE petition_id = ? ORDER BY signed_at ASC`
+    )
+    .all(petitionId) as {
+    petition_id: string;
+    signer_telegram_id: string;
+    comment: string | null;
+    signed_at: string;
+  }[];
+  const header = petitionExportIncludesUsername
+    ? "petition_id,signed_at,signer_telegram_id,comment\n"
+    : "petition_id,signed_at,signer_hash,comment\n";
+  const lines = rows.map((r) => {
+    const ref = signerExportRef(r.petition_id, r.signer_telegram_id);
+    const c = csvEscapeCell((r.comment ?? "").replace(/\r?\n/g, " "));
+    return [csvEscapeCell(r.petition_id), csvEscapeCell(r.signed_at), csvEscapeCell(ref), c].join(",");
+  });
+  reply
+    .header("content-type", "text/csv; charset=utf-8")
+    .header("content-disposition", `attachment; filename="petition-${petitionId}-signatures.csv"`);
+  return reply.send(`${header}${lines.join("\n")}${lines.length ? "\n" : ""}`);
 });
 
 function requireVaultMaster(reply: { status: (n: number) => { send: (b: unknown) => unknown } }): boolean {
@@ -1189,6 +1770,12 @@ app.post<{ Querystring: { secret?: string; telegramId?: string } }>(
   }
 );
 
+app.get<{ Querystring: { secret?: string } }>("/api/cron/group-broadcast-chats", async (req, reply) => {
+  if (!assertCron(req, reply)) return;
+  const rows = db.prepare(`SELECT chat_id FROM group_broadcasts WHERE enabled = 1`).all() as { chat_id: string }[];
+  return { chatIds: rows.map((r) => r.chat_id) };
+});
+
 app.get<{ Querystring: { secret?: string } }>("/api/cron/group-stats", async (req, reply) => {
   if (!assertCron(req, reply)) return;
   const rows = db.prepare(`SELECT chat_id, title, alerts_members FROM group_stats`).all() as {
@@ -1200,9 +1787,11 @@ app.get<{ Querystring: { secret?: string } }>("/api/cron/group-stats", async (re
 });
 
 const pollMs = Number(process.env.DISPUTE_POLL_MS ?? 12000);
-const ethOoLookback = BigInt(process.env.OO_LOOKBACK_BLOCKS ?? "4000");
+/** Mainnet OO cold start: ~20000 blocks ≈ ~2.8d at 12s (raise if indexer was offline longer). */
+const ethOoLookback = BigInt(process.env.OO_LOOKBACK_BLOCKS ?? "20000");
+/** Polygon OO cold start: default 80000 ≈ ~2d at ~2.1s; was 4000 (~2.3h) and missed older active disputes on fresh DB. */
 const polygonOoLookback = BigInt(
-  process.env.OO_POLYGON_LOOKBACK_BLOCKS ?? process.env.OO_LOOKBACK_BLOCKS ?? "4000"
+  process.env.OO_POLYGON_LOOKBACK_BLOCKS ?? process.env.OO_LOOKBACK_BLOCKS ?? "80000"
 );
 
 if (ethClient || polygonOoClient) {

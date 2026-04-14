@@ -15,6 +15,7 @@ function pm(
     title: "Test",
     slug: null,
     url: null,
+    image: null,
     outcomes: outcomes.map((o) => ({
       label: o.label,
       tokenId: "t",
@@ -84,6 +85,7 @@ describe("computePolymarketReversalWatch", () => {
       title: "Multi",
       slug: null,
       url: null,
+      image: null,
       outcomes: [
         { label: "A", tokenId: "a", priceBuy: null, priceSell: null, mid: "0.2" },
         { label: "B", tokenId: "b", priceBuy: null, priceSell: null, mid: "0.3" },

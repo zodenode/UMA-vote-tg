@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { apiGet } from "../api";
 import { encodeVoteFocusToken } from "../voteFocusToken";
+import LandingVotesFeedLoader from "./LandingVotesFeedLoader";
 
 type LandingDispute = {
   id: string;
@@ -32,24 +34,26 @@ function shortHex(s: string, head = 10, tail = 6): string {
   return `${t.slice(0, head)}…${t.slice(-tail)}`;
 }
 
+const FEED_TITLE = "Votes & disputes";
+const INITIAL_VISIBLE = 5;
+
 export default function LandingDisputesFeed() {
+  const [expanded, setExpanded] = useState(false);
   const q = useQuery({
-    queryKey: ["landing-disputes"],
-    queryFn: () => apiGet<VotesPayloadLite>("/api/votes?limit=10&chain=137"),
-    refetchInterval: 45_000,
+    queryKey: ["landing-disputes", "omitRequests"],
+    queryFn: () =>
+      apiGet<VotesPayloadLite>("/api/votes?limit=12&chain=137&omitRequests=1"),
+    staleTime: 120_000,
+    refetchInterval: 60_000,
   });
 
   if (q.isPending) {
     return (
       <section className="landing-feed" aria-labelledby="landing-feed-title">
         <h2 id="landing-feed-title" className="landing-section-title">
-          Live disputed queries
+          {FEED_TITLE}
         </h2>
-        <div className="landing-feed-skeleton" aria-busy>
-          <div className="landing-feed-skel-line" />
-          <div className="landing-feed-skel-line landing-feed-skel-line--wide" />
-          <div className="landing-feed-skel-line" />
-        </div>
+        <LandingVotesFeedLoader />
       </section>
     );
   }
@@ -58,7 +62,7 @@ export default function LandingDisputesFeed() {
     return (
       <section className="landing-feed" aria-labelledby="landing-feed-title">
         <h2 id="landing-feed-title" className="landing-section-title">
-          Live disputed queries
+          {FEED_TITLE}
         </h2>
         <p className="landing-feed-muted">
           Could not load disputes. Use a reachable API (same-origin <code className="landing-feed-code">/api</code> or set{" "}
@@ -74,11 +78,14 @@ export default function LandingDisputesFeed() {
   }
 
   const disputes = q.data?.disputes ?? [];
+  const visibleDisputes =
+    expanded || disputes.length <= INITIAL_VISIBLE ? disputes : disputes.slice(0, INITIAL_VISIBLE);
+  const hasMore = !expanded && disputes.length > INITIAL_VISIBLE;
 
   return (
     <section className="landing-feed" aria-labelledby="landing-feed-title">
       <h2 id="landing-feed-title" className="landing-section-title">
-        Live disputed queries
+        {FEED_TITLE}
       </h2>
       <p className="landing-feed-lead">
         Polygon OO disputes headed to the DVM. <strong>Stake</strong> UMA on Ethereum VotingV2 for voting weight (use
@@ -97,7 +104,7 @@ export default function LandingDisputesFeed() {
         </p>
       ) : (
         <ul className="landing-dispute-list">
-          {disputes.map((d) => {
+          {visibleDisputes.map((d) => {
             const title =
               d.polymarket?.title?.trim() ||
               `${d.source} · ${shortHex(d.identifier, 12, 8)}`;
@@ -143,6 +150,14 @@ export default function LandingDisputesFeed() {
           })}
         </ul>
       )}
+
+      {hasMore ? (
+        <p className="landing-feed-more-wrap">
+          <button type="button" className="landing-btn landing-btn--ghost" onClick={() => setExpanded(true)}>
+            Show {disputes.length - INITIAL_VISIBLE} more
+          </button>
+        </p>
+      ) : null}
 
       <p className="landing-feed-footer">
         <Link to="/votes" className="landing-feed-link">

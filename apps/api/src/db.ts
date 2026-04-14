@@ -32,6 +32,14 @@ export function openDb(filePath: string) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS group_broadcasts (
+      chat_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      title TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_broadcasts_enabled ON group_broadcasts(enabled);
+
     CREATE TABLE IF NOT EXISTS alert_digest (
       telegram_id TEXT PRIMARY KEY,
       last_sent_at TEXT
@@ -110,9 +118,84 @@ export function openDb(filePath: string) {
       payload_json TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS petitions (
+      id TEXT PRIMARY KEY,
+      creator_telegram_id TEXT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      hidden INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      closed_at TEXT,
+      image_url TEXT,
+      dispute_key TEXT,
+      condition_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_petitions_creator ON petitions(creator_telegram_id);
+    CREATE INDEX IF NOT EXISTS idx_petitions_created ON petitions(created_at);
+
+    CREATE TABLE IF NOT EXISTS petition_signatures (
+      petition_id TEXT NOT NULL REFERENCES petitions(id) ON DELETE CASCADE,
+      signer_telegram_id TEXT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+      comment TEXT,
+      signed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      wallet_address TEXT,
+      wallet_message TEXT,
+      wallet_signature TEXT,
+      PRIMARY KEY (petition_id, signer_telegram_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_petition_signatures_petition ON petition_signatures(petition_id);
+
+    CREATE TABLE IF NOT EXISTS petition_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      petition_id TEXT NOT NULL REFERENCES petitions(id) ON DELETE CASCADE,
+      reporter_telegram_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_petition_reports_unique ON petition_reports(petition_id, reporter_telegram_id);
+    CREATE INDEX IF NOT EXISTS idx_petition_reports_petition ON petition_reports(petition_id);
+
+    CREATE TABLE IF NOT EXISTS user_linked_wallets (
+      telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+      address TEXT NOT NULL,
+      linked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_linked_wallets_address ON user_linked_wallets(address);
   `);
   migrateOoMultiChain(db);
+  migratePetitionsSchema(db);
   return db;
+}
+
+function migratePetitionsSchema(db: Database.Database) {
+  const pcols = db.prepare(`PRAGMA table_info(petitions)`).all() as { name: string }[];
+  if (!pcols.some((c) => c.name === "image_url")) {
+    db.exec(`ALTER TABLE petitions ADD COLUMN image_url TEXT`);
+  }
+  if (!pcols.some((c) => c.name === "dispute_key")) {
+    db.exec(`ALTER TABLE petitions ADD COLUMN dispute_key TEXT`);
+  }
+  if (!pcols.some((c) => c.name === "condition_id")) {
+    db.exec(`ALTER TABLE petitions ADD COLUMN condition_id TEXT`);
+  }
+  const scols = db.prepare(`PRAGMA table_info(petition_signatures)`).all() as { name: string }[];
+  if (!scols.some((c) => c.name === "wallet_address")) {
+    db.exec(`ALTER TABLE petition_signatures ADD COLUMN wallet_address TEXT`);
+  }
+  if (!scols.some((c) => c.name === "wallet_message")) {
+    db.exec(`ALTER TABLE petition_signatures ADD COLUMN wallet_message TEXT`);
+  }
+  if (!scols.some((c) => c.name === "wallet_signature")) {
+    db.exec(`ALTER TABLE petition_signatures ADD COLUMN wallet_signature TEXT`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_linked_wallets (
+      telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+      address TEXT NOT NULL,
+      linked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_linked_wallets_address ON user_linked_wallets(address)`);
 }
 
 /** Legacy DBs: per-chain OO cursor + disputed_queries.chain_id + stable cross-chain dispute_key. */

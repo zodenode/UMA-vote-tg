@@ -21,6 +21,7 @@ export type PolymarketBlock = {
   title: string | null;
   slug: string | null;
   url: string | null;
+  image?: string | null;
   outcomes: PolymarketOutcome[];
   proposedPriceHint: string | null;
   fetchedAt: number;

@@ -9,6 +9,7 @@ import Swap from "./pages/Swap";
 import Votes from "./pages/Votes";
 import VoteDisputeDetail from "./pages/VoteDisputeDetail";
 import Account from "./pages/Account";
+import PetitionDetail from "./pages/PetitionDetail";
 import { apiPost, getInitData, getStartParam } from "./api";
 import { SessionProvider, type Session } from "./session";
 
@@ -60,6 +61,13 @@ function VoteStartRedirect() {
       } else {
         navigate("/votes", { replace: true });
       }
+      return;
+    }
+    if (sp.startsWith("petition_")) {
+      const pid = sp.slice(9).trim().toLowerCase();
+      if (pid.length > 0 && pid.length <= 64 && /^[a-f0-9]+$/.test(pid)) {
+        navigate(`/petitions/${pid}`, { replace: true });
+      }
     }
   }, [navigate]);
   return null;
@@ -80,6 +88,7 @@ export default function App() {
   const onLanding =
     path === "/welcome" || path === "/insure" || path === "/voter" || (path === "/" && !miniApp);
   const onVotesSection = path === "/votes" || path.startsWith("/votes/");
+  const onPetitionSection = path.startsWith("/petitions/");
   const onMobileWebShell =
     isMobileWebNav &&
     (path === "/" ||
@@ -88,11 +97,13 @@ export default function App() {
       path === "/insure" ||
       path === "/swap" ||
       onVotesSection ||
+      onPetitionSection ||
       path === "/account");
   const showTabBar =
-    (miniApp && (path === "/" || path === "/swap" || onVotesSection || path === "/account")) ||
+    (miniApp &&
+      (path === "/" || path === "/swap" || onVotesSection || onPetitionSection || path === "/account")) ||
     (!miniApp && onMobileWebShell) ||
-    (!miniApp && !isMobileWebNav && (path === "/swap" || onVotesSection || path === "/account"));
+    (!miniApp && !isMobileWebNav && (path === "/swap" || onVotesSection || onPetitionSection || path === "/account"));
 
   useEffect(() => {
     applyTelegramTheme();
@@ -160,6 +171,7 @@ export default function App() {
           <Route path="/swap" element={<Swap />} />
           <Route path="/votes" element={<Votes />} />
           <Route path="/votes/dispute/:token" element={<VoteDisputeDetail />} />
+          <Route path="/petitions/:id" element={<PetitionDetail />} />
           <Route path="/account" element={<Account />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

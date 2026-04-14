@@ -35,6 +35,7 @@ Telegram bot + Mini App focused on **Polygon** prediction-market **OOv2 disputes
 - **Custodial vault:** With **`VAULT_MASTER_KEY`** and **`ETH_RPC_URL`** on the API, users can create a vault wallet (encrypted in SQLite), optionally **export the private key once**, and **commit/reveal** via **`/vote`**, **`/reveal`**, **`/wallet`** in the bot (internal API + `INTERNAL_API_SECRET`) or the **Vote with custodial vault** path in the Mini App. Salts for vault commits are stored in **`vault_vote_commits`** on the server.
 - **Bot shortcut:** **Vote in Mini App** opens the web app with `startapp=vote` so the client navigates to the Votes tab when Telegram supplies the start parameter.
 - **Bot voting flow:** **`/votes`** (or **Vote from bot**) loads disputes from the public API and attaches **Web App** buttons per row (`startapp=vote_<token>`). Use **`/vote`** for vault-signed commits or the Mini App wallet for browser signing.
+- **Community petitions:** **`/petition`** in DM runs a two-step wizard; share links use **`/start petition_<id>`**; the Mini App opens **`startapp=petition_<id>`** to read/sign. CSV export: **`GET /api/cron/petition-export?secret=CRON_SECRET&petitionId=<id>`** (signer ids hashed by default; see **`PETITION_EXPORT_INCLUDES_USERNAME`** in `.env.example`). **`POST /api/internal/petition/set-hidden`** (internal) toggles visibility for moderation.
 - **Polymarket context:** Disputed rows may include **Gamma + CLOB**-derived titles/links/outcome prices for **informational** comparison with OO proposed prices (not trading or financial advice).
 - **Landing:** In a normal browser, **`/`** and **`/welcome`** render the **uma.vote** marketing page; the Telegram Mini App still opens **`/`** as the in-app home when `initData` is present.
 - **`ProposePrice`:** Not indexed in this MVP; only the **disputed** flip is treated as the high-signal event. The same poller pattern can extend to proposals later.
@@ -49,6 +50,8 @@ npm run dev:bot    # terminal 3
 ```
 
 3. In [@BotFather](https://t.me/BotFather), set the Mini App URL to your hosted `apps/web` build (HTTPS).
+
+4. **Inline mode (optional but recommended for sharing):** In @BotFather run `/setinline`, pick your bot, enable **Inline mode**, and set a placeholder hint (e.g. `Search disputes…`). Users can then type `@YourBot vote` in any chat to pick a result card with Mini App buttons. **Group relay:** In a group or channel where the bot can post, an admin can run **`/relay_on`** so **new dispute indexer batches** are posted there (same summary as DM alerts). **`/relay_off`** stops relay; **daily digest** stays DM-only for subscribers.
 
 Set `VITE_API_URL` / `VITE_PUBLIC_BOT_USERNAME` when building the web app so the client can reach the API and build `t.me` referral links. `VITE_MAINNET_RPC_URL` and `VITE_POLYGON_RPC_URL` default to the same chainlist-style public endpoints in `.env.example`; add `VITE_WALLETCONNECT_PROJECT_ID` for Telegram mobile wallets.
 

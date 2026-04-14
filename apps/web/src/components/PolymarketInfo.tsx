@@ -17,6 +17,22 @@ export default function PolymarketInfo(props: {
         border: "1px solid rgba(127, 127, 127, 0.2)",
       }}
     >
+      {pm.image ? (
+        <img
+          src={pm.image}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          style={{
+            width: "100%",
+            maxHeight: 160,
+            objectFit: "cover",
+            borderRadius: 6,
+            marginBottom: 10,
+            display: "block",
+          }}
+        />
+      ) : null}
       <p style={{ margin: 0, fontSize: 13 }}>
         <b>Polymarket</b> <span className="muted">(informational, not advice)</span>
       </p>

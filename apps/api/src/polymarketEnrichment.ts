@@ -13,6 +13,8 @@ export type PolymarketEnrichment = {
   title: string | null;
   slug: string | null;
   url: string | null;
+  /** Gamma `image` / `icon` (HTTPS) for list thumbnails */
+  image: string | null;
   outcomes: PolymarketOutcomePrice[];
   proposedPriceHint: string | null;
   fetchedAt: number;
@@ -80,6 +82,8 @@ type GammaMarket = {
   conditionId?: string;
   clobTokenIds?: string;
   outcomes?: string;
+  image?: string;
+  icon?: string;
 };
 
 function parseJsonArrayField(raw: string | undefined): string[] {
@@ -123,6 +127,7 @@ export async function enrichDisputeRow(row: DisputeLike): Promise<PolymarketEnri
         title: null,
         slug: null,
         url: null,
+        image: null,
         outcomes: [],
         proposedPriceHint: row.proposed_price,
         fetchedAt: now,
@@ -134,6 +139,12 @@ export async function enrichDisputeRow(row: DisputeLike): Promise<PolymarketEnri
     const title = m.question ?? null;
     const slug = m.slug ?? null;
     const url = slug ? `https://polymarket.com/market/${encodeURIComponent(slug)}` : null;
+    const image =
+      typeof m.image === "string" && m.image.startsWith("http")
+        ? m.image
+        : typeof m.icon === "string" && m.icon.startsWith("http")
+          ? m.icon
+          : null;
     const tokenIds = parseJsonArrayField(m.clobTokenIds);
     const labels = parseJsonArrayField(m.outcomes);
     const outcomes: PolymarketOutcomePrice[] = [];
@@ -157,6 +168,7 @@ export async function enrichDisputeRow(row: DisputeLike): Promise<PolymarketEnri
       title,
       slug,
       url,
+      image,
       outcomes,
       proposedPriceHint: row.proposed_price,
       fetchedAt: now,
@@ -167,6 +179,7 @@ export async function enrichDisputeRow(row: DisputeLike): Promise<PolymarketEnri
       title: null,
       slug: null,
       url: null,
+      image: null,
       outcomes: [],
       proposedPriceHint: row.proposed_price,
       fetchedAt: now,

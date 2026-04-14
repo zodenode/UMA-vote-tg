@@ -34,7 +34,8 @@ export default function Votes() {
 
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [source, setSource] = useState<string>("");
-  const [chain, setChain] = useState<string>("137");
+  /** Default all chains so Ethereum + Polygon disputes both show (Polygon-only filter hid mainnet rows). */
+  const [chain, setChain] = useState<string>("");
   const [topic, setTopic] = useState<string>("");
   const [minBond, setMinBond] = useState<string>("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -145,17 +146,34 @@ export default function Votes() {
       ) : (
         disputes.map((d: Dispute) => (
           <div key={d.id} className="card votes-dispute-preview">
-            <div className="votes-dispute-preview-head">
-              <h3 className="votes-dispute-preview-title">{disputeTitle(d)}</h3>
-              <span className="votes-dispute-preview-badges">
-                {d.reversalWatch ? (
-                  <span className="badge badge--reversal-watch" title={d.reversalWatchReason ?? undefined}>
-                    Reversal watch
-                  </span>
-                ) : null}
-                <span className="badge">{d.chainId === 137 ? "Polygon" : "Ethereum"}</span>
-                {d.topics.length ? <span className="badge">{d.topics.join(", ")}</span> : null}
-              </span>
+            <div
+              className={
+                d.polymarket?.image
+                  ? "votes-dispute-preview-row votes-dispute-preview-row--media"
+                  : "votes-dispute-preview-row"
+              }
+            >
+              {d.polymarket?.image ? (
+                <img
+                  className="votes-dispute-preview-img"
+                  src={d.polymarket.image}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                />
+              ) : null}
+              <div className="votes-dispute-preview-head">
+                <h3 className="votes-dispute-preview-title">{disputeTitle(d)}</h3>
+                <span className="votes-dispute-preview-badges">
+                  {d.reversalWatch ? (
+                    <span className="badge badge--reversal-watch" title={d.reversalWatchReason ?? undefined}>
+                      Reversal watch
+                    </span>
+                  ) : null}
+                  <span className="badge">{d.chainId === 137 ? "Polygon" : "Ethereum"}</span>
+                  {d.topics.length ? <span className="badge">{d.topics.join(", ")}</span> : null}
+                </span>
+              </div>
             </div>
             {d.polymarket ? (
               <p className="muted" style={{ margin: "6px 0 0", fontSize: 13 }}>
@@ -209,8 +227,8 @@ export default function Votes() {
           value={chain}
           onChange={(e) => setChain(e.target.value)}
         >
-          <option value="137">Polygon (default)</option>
           <option value="">All chains</option>
+          <option value="137">Polygon</option>
           <option value="1">Ethereum</option>
         </select>
         <label className="muted" htmlFor="top" style={{ display: "block", marginTop: 12 }}>
@@ -242,17 +260,9 @@ export default function Votes() {
         />
       </details>
 
-      {data.subgraphError ? (
-        <p className="muted" style={{ color: data.requestsSource === "rpc" ? "var(--muted)" : "var(--danger)" }}>
-          {data.requestsSource === "rpc" ? (
-            <>
-              <b>Subgraph:</b> {data.subgraphError} — advanced list uses on-chain RPC.
-            </>
-          ) : (
-            <>
-              <b>Could not load proposals:</b> {data.subgraphError}
-            </>
-          )}
+      {data.subgraphError && data.requestsSource !== "rpc" ? (
+        <p className="muted" style={{ color: "var(--danger)" }}>
+          <b>Could not load proposals:</b> {data.subgraphError}
         </p>
       ) : null}
 

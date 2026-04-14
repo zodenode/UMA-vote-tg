@@ -6,6 +6,7 @@ import {
   parseAbiItem,
   type Chain,
   type Hex,
+  type Log,
   type PublicClient,
 } from "viem";
 import { mainnet, polygon } from "viem/chains";
@@ -25,6 +26,15 @@ export function toHttpRpcUrl(rpcUrl: string): string {
 }
 
 const rpcTimeoutMs = Number(process.env.ETH_HTTP_TIMEOUT_MS ?? "120000") || 120_000;
+
+/**
+ * Many RPCs cap `eth_getLogs` block span (e.g. publicnode "max 1000" = at most ~999 height diff between from/to).
+ * Default 999 so production public RPCs work; raise (e.g. 1999) for providers that allow wider ranges.
+ */
+const ooLogChunkBlocks = (() => {
+  const n = Number(process.env.OO_LOG_CHUNK_BLOCKS ?? "999");
+  return BigInt(n > 0 ? n : 999);
+})();
 
 export function createOoClient(rpcUrl: string, chain: Chain): PublicClient {
   return createPublicClient({
@@ -80,12 +90,30 @@ export async function pollDisputePriceLogs(
     return 0;
   }
 
-  const logs = await client.getLogs({
-    address: ooAddress,
-    event: disputePriceAbi,
-    fromBlock,
-    toBlock: latest,
-  });
+  const logs: Log[] = [];
+  let chunkFrom = fromBlock;
+  while (chunkFrom <= latest) {
+    const chunkTo = chunkFrom + ooLogChunkBlocks > latest ? latest : chunkFrom + ooLogChunkBlocks;
+    try {
+      const chunk = await client.getLogs({
+        address: ooAddress,
+        event: disputePriceAbi,
+        fromBlock: chunkFrom,
+        toBlock: chunkTo,
+      });
+      logs.push(...chunk);
+    } catch (e) {
+      log.error({
+        msg: "getLogs chunk failed (check RPC eth_getLogs limits / timeout)",
+        chainId: chainIdStr,
+        chunkFrom: chunkFrom.toString(),
+        chunkTo: chunkTo.toString(),
+        err: e instanceof Error ? e.message : String(e),
+      });
+      throw e;
+    }
+    chunkFrom = chunkTo + 1n;
+  }
 
   let inserted = 0;
   const insert = db.prepare(`

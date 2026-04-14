@@ -1,9 +1,10 @@
 import { createConfig, http } from "wagmi";
 import { mainnet, polygon } from "wagmi/chains";
 import { injected, walletConnect } from "wagmi/connectors";
+import { rpcHttpUrl } from "./rpcHttpUrl";
 
-const mainnetRpc = import.meta.env.VITE_MAINNET_RPC_URL as string | undefined;
-const polygonRpc = import.meta.env.VITE_POLYGON_RPC_URL as string | undefined;
+const mainnetRpc = rpcHttpUrl(import.meta.env.VITE_MAINNET_RPC_URL as string | undefined);
+const polygonRpc = rpcHttpUrl(import.meta.env.VITE_POLYGON_RPC_URL as string | undefined);
 const walletConnectProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined;
 
 const connectors = [

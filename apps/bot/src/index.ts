@@ -72,6 +72,7 @@ function mainMenuKeyboard(alertsOn: boolean) {
     kb.webApp("📱 Mini App (home)", webAppUrl).row();
   }
   kb.text("📋 Indexed disputes", "vote_list").row();
+  kb.switchInline("📣 Share dispute search…", "vote ").row();
   kb.text(alertsOn ? "🔔 Alerts ON" : "🔔 Alerts off", "alerts_on").text(alertsOn ? "🔕 Turn off" : "🔕 Turn on", "alerts_off").row();
   kb.text("⚙️ More · vault & links", "menu_more").row();
   return kb;
@@ -158,7 +159,7 @@ async function replyVotePicker(ctx: Context) {
   await sendChatAction(ctx, "typing");
   const uid = String(ctx.from?.id ?? "");
   const alertsOn = await getAlertsOn(uid);
-  const res = await fetch(`${apiUrl}/api/votes?limit=8`);
+  const res = await fetch(`${apiUrl}/api/votes?limit=8&omitRequests=1`);
   if (!res.ok) {
     await ctx.reply("Could not load disputes from the API. Check API_PUBLIC_URL and the API service.");
     return;
@@ -187,6 +188,7 @@ async function replyVotePicker(ctx: Context) {
     kb.webApp(label, webAppUrlWithStartParam(webAppUrl, startapp)).row();
   }
   kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  kb.switchInline("📣 Share in any chat…", "vote ").row();
   kb.text("« 🏠 Home", "menu_home").row();
   await ctx.reply(
     [
@@ -208,6 +210,69 @@ function parseRefFromStart(text: string | undefined): string | null {
   const payload = parts[1];
   if (!payload?.startsWith("ref_")) return null;
   return payload.slice(4) || null;
+}
+
+function parsePetitionFromStart(text: string | undefined): string | null {
+  if (!text?.startsWith("/start")) return null;
+  const parts = text.trim().split(/\s+/);
+  const payload = parts[1];
+  if (!payload?.startsWith("petition_")) return null;
+  const id = (payload.slice(9) || "").trim().toLowerCase();
+  if (!id || id.length > 64 || !/^[a-f0-9]+$/.test(id)) return null;
+  return id;
+}
+
+const PETITION_DISCLAIMER_BOT =
+  "Community expression only — not legal advice. Signing does not create a lawsuit or attorney–client relationship.";
+
+type PetitionDraftState = { step: "title" | "body"; title?: string };
+const petitionDraft = new Map<string, PetitionDraftState>();
+
+async function replyPetitionCard(ctx: Context, petitionId: string, opts?: { withHomeRow?: boolean }): Promise<void> {
+  const res = await fetch(`${apiUrl}/api/petitions/${encodeURIComponent(petitionId)}`);
+  if (!res.ok) {
+    await ctx.reply("That petition was not found (or the id is invalid).");
+    return;
+  }
+  const p = (await res.json()) as {
+    id: string;
+    hidden?: boolean;
+    title: string;
+    body: string | null;
+    signatureCount: number;
+    createdAt?: string;
+    legalNote?: string;
+  };
+  const me = await ctx.api.getMe();
+  const un = (botUsername || me.username || "").replace(/^@/, "");
+  const shareUrl = un ? `https://t.me/${un}?start=petition_${encodeURIComponent(p.id)}` : "";
+  const lines = [
+    "📜 <b>Community petition</b>",
+    "",
+    `<b>${escapeHtml(p.title)}</b>`,
+    p.body ? `\n${escapeHtml(p.body.slice(0, 3500))}${p.body.length > 3500 ? "…" : ""}` : "",
+    "",
+    `✍️ <b>Signatures:</b> ${p.signatureCount}`,
+    "",
+    `<i>${escapeHtml(PETITION_DISCLAIMER_BOT)}</i>`,
+  ].filter(Boolean);
+  const kb = new InlineKeyboard();
+  if (p.body != null && !p.hidden) {
+    kb.text("✍️ Sign (Telegram)", `petition_sign:${p.id}`).row();
+  }
+  if (webAppUrl) {
+    kb.webApp("Open in Mini App", webAppUrlWithStartParam(webAppUrl, `petition_${p.id}`)).row();
+  }
+  if (shareUrl) {
+    kb.url("Share t.me link", shareUrl).row();
+  }
+  if (p.body != null) {
+    kb.text("⚠️ Report", `petition_report:${p.id}`).row();
+  }
+  if (opts?.withHomeRow) {
+    kb.text("« 🏠 Home", "menu_home").row();
+  }
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
 async function internalJson(path: string, body: unknown) {
@@ -282,7 +347,32 @@ type ApiDispute = {
   polymarket: ApiPm;
   reversalWatch?: boolean;
   reversalWatchReason?: string | null;
+  voterDappUrl?: string;
 };
+
+const GROUP_RELAY_DELAY_MS = 45;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function matchesInlineQuery(d: ApiDispute, q: string): boolean {
+  const t = q.trim().toLowerCase();
+  if (t.length < 2) return true;
+  const hay = [
+    d.source,
+    d.id,
+    d.polymarket?.title ?? "",
+    ...(d.polymarket?.outcomes?.map((o) => o.label) ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  if (hay.includes(t)) return true;
+  for (const word of t.split(/\s+/).filter((w) => w.length >= 2)) {
+    if (hay.includes(word)) return true;
+  }
+  return false;
+}
 
 function pmSummary(
   pm: ApiPm,
@@ -326,8 +416,137 @@ async function ensureInternal(ctx: Context): Promise<boolean> {
   return true;
 }
 
+function shortDisputeId(id: string): string {
+  const t = id.trim();
+  return t.length > 30 ? `${t.slice(0, 14)}…${t.slice(-12)}` : t;
+}
+
+/** Inline mode: share Mini App cards for indexed disputes (enable Inline in @BotFather). */
+async function buildInlineVoteArticles(rawQuery: string): Promise<unknown[]> {
+  const q = (rawQuery ?? "").trim();
+  const res = await fetch(`${apiUrl}/api/votes?limit=14&omitRequests=1`).catch(() => null);
+  if (!res?.ok) {
+    return [
+      {
+        type: "article",
+        id: "uma-offline",
+        title: "Disputes unavailable",
+        description: "API did not respond",
+        input_message_content: {
+          message_text: "Could not load the dispute list. Try again from the bot.",
+        },
+      },
+    ];
+  }
+  const data = (await res.json()) as { disputes?: ApiDispute[] };
+  let rows = data.disputes ?? [];
+  if (q.length >= 2) {
+    rows = rows.filter((d) => matchesInlineQuery(d, q));
+  }
+  const out: unknown[] = [];
+  if (webAppUrl) {
+    out.push({
+      type: "article",
+      id: "uma-vote-home",
+      title: "uma.vote — search & vote",
+      description: q.length < 2 ? "Open Mini App (paste Polymarket link or search)" : `Refine “${q.slice(0, 36)}” in the app`,
+      input_message_content: {
+        message_text: [
+          "🗳 <b>uma.vote</b>",
+          "",
+          "Open the Mini App to find disputed markets, see DVM timing, and vote.",
+          "",
+          "<i>Not affiliated with the UMA Foundation — docs.uma.xyz</i>",
+        ].join("\n"),
+        parse_mode: "HTML",
+      },
+      reply_markup: new InlineKeyboard()
+        .webApp("Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote"))
+        .row()
+        .webApp("Mini App home", webAppUrl),
+    });
+  } else {
+    out.push({
+      type: "article",
+      id: "uma-no-webapp",
+      title: "uma.vote",
+      description: "WEB_APP_URL is not set on this bot",
+      input_message_content: { message_text: "Configure WEB_APP_URL on the bot host to open the Mini App from inline results." },
+    });
+  }
+  const cap = 18;
+  for (let i = 0; i < Math.min(rows.length, cap); i++) {
+    const d = rows[i]!;
+    const token = encodeVoteFocusToken(d.id);
+    const startapp = `vote_${token}`;
+    if (startapp.length > 512) continue;
+    const title = (d.polymarket?.title?.trim() || `${d.source} · ${shortDisputeId(d.id)}`).slice(0, 64);
+    const desc = `${d.source} · ${d.chainId === 137 ? "Polygon" : "Ethereum"} — tap to post this card`;
+    const head = escapeHtml((d.polymarket?.title?.trim() || `${d.source} · ${shortDisputeId(d.id)}`).slice(0, 280));
+    const pmBlock = pmSummary(d.polymarket, d);
+    const body = [`🗳 <b>Disputed query</b>`, "", `<b>${head}</b>`, pmBlock, "", "<i>Open Mini App to vote (wallet or vault).</i>"].join(
+      "\n"
+    );
+    const rid = `d${i}-${token.slice(0, 24)}`.slice(0, 64);
+    const voterUrl = d.voterDappUrl?.trim() || "https://vote.umaproject.org/";
+    const kb = new InlineKeyboard();
+    if (webAppUrl) {
+      kb.webApp("Open in Mini App", webAppUrlWithStartParam(webAppUrl, startapp)).row();
+    }
+    kb.url("Official voter dApp", voterUrl);
+    out.push({
+      type: "article",
+      id: rid,
+      title,
+      description: desc.slice(0, 255),
+      input_message_content: {
+        message_text: body.slice(0, 4090),
+        parse_mode: "HTML",
+      },
+      reply_markup: kb,
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      type: "article",
+      id: "uma-empty",
+      title: "No matches in quick index",
+      description: "Try another keyword or open Search in the Mini App",
+      input_message_content: {
+        message_text: "No indexed disputes matched that text. Open the bot and use Search, or try a shorter query.",
+      },
+    });
+  }
+  return out;
+}
+
+bot.on("inline_query", async (ctx) => {
+  try {
+    const articles = await buildInlineVoteArticles(ctx.inlineQuery.query);
+    await ctx.answerInlineQuery(articles as never, { cache_time: 15, is_personal: true });
+  } catch (e) {
+    console.error("inline_query failed", e);
+    try {
+      await ctx.answerInlineQuery(
+        [
+          {
+            type: "article",
+            id: "uma-inline-err",
+            title: "Inline error",
+            input_message_content: { message_text: "Something went wrong loading inline results. Try again." },
+          },
+        ] as never,
+        { cache_time: 1 }
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
 bot.command("start", async (ctx) => {
   const ref = parseRefFromStart(ctx.message?.text);
+  const petitionId = parsePetitionFromStart(ctx.message?.text);
   const uid = String(ctx.from?.id ?? "");
   let alertsOn = false;
   if (uid && internalSecret) {
@@ -345,6 +564,19 @@ bot.command("start", async (ctx) => {
       }
     }
   }
+  if (petitionId) {
+    await replyPetitionCard(ctx, petitionId, { withHomeRow: true });
+    const kb = mainMenuKeyboard(alertsOn);
+    const cap = welcomeCaptionHtml();
+    const photo = welcomePhotoUrl || welcomePhotoFileId;
+    if (photo) {
+      await sendChatAction(ctx, "upload_photo");
+      await ctx.replyWithPhoto(photo, { caption: cap, parse_mode: "HTML", reply_markup: kb });
+    } else {
+      await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
+    }
+    return;
+  }
   const kb = mainMenuKeyboard(alertsOn);
   const cap = welcomeCaptionHtml();
   const photo = welcomePhotoUrl || welcomePhotoFileId;
@@ -360,6 +592,76 @@ bot.command("votes", async (ctx) => {
   await replyVotePicker(ctx);
 });
 
+bot.command("invite", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (!(await ensureInternal(ctx))) return;
+  const r = await internalJson("/api/internal/ensure-user", {
+    telegramId: uid,
+    username: ctx.from?.username,
+    ref: null,
+  });
+  if (!r.ok) {
+    await ctx.reply("Could not load your invite link. Is the API running?");
+    return;
+  }
+  const j = (await r.json()) as { refCode?: string };
+  const code = (j.refCode ?? "").trim();
+  if (!code) {
+    await ctx.reply("Invite code not ready — try again in a moment.");
+    return;
+  }
+  const me = await ctx.api.getMe();
+  const un = (botUsername || me.username || "").replace(/^@/, "");
+  if (!un) {
+    await ctx.reply("Set PUBLIC_BOT_USERNAME on the bot for a stable invite URL.");
+    return;
+  }
+  const refLink = `https://t.me/${un}?start=ref_${encodeURIComponent(code)}`;
+  const miniLink = webAppUrl ? `https://t.me/${un}?startapp=${encodeURIComponent("vote")}` : "";
+  const lines = [
+    "📎 <b>Your invite link</b>",
+    "",
+    `<a href="${escapeHtml(refLink)}">${escapeHtml(refLink)}</a>`,
+    "",
+    "Anyone who opens the bot with your link is attributed to you in our database.",
+  ];
+  if (miniLink) {
+    lines.push("", "Mini App (opens Vote flow):");
+    lines.push(`<a href="${escapeHtml(miniLink)}">${escapeHtml(miniLink)}</a>`);
+  }
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+});
+
+bot.command("petition_cancel", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  petitionDraft.delete(uid);
+  await ctx.reply("Petition draft cancelled.");
+});
+
+bot.command("petition", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  if (!uid) return;
+  if (ctx.chat?.type !== "private") {
+    await ctx.reply("Start a petition in <b>private chat</b> with the bot (opens DM).", { parse_mode: "HTML" });
+    return;
+  }
+  if (!(await ensureInternal(ctx))) return;
+  petitionDraft.set(uid, { step: "title" });
+  await ctx.reply(
+    [
+      "📜 <b>New community petition</b>",
+      "",
+      `Send a <b>short title</b> (one message, max ~${120} chars).`,
+      "",
+      `<i>${escapeHtml(PETITION_DISCLAIMER_BOT)}</i>`,
+      "",
+      "<code>/petition_cancel</code> to abort.",
+    ].join("\n"),
+    { parse_mode: "HTML" }
+  );
+});
+
 bot.command("help", async (ctx) => {
   const uid = String(ctx.from?.id ?? "");
   const alertsOn = await getAlertsOn(uid);
@@ -370,11 +672,15 @@ bot.command("help", async (ctx) => {
       "🏠 <code>/start</code> — home menu",
       "🔍 Mini App → paste Polymarket URL / search (same as menu <b>Search or paste link</b>)",
       "📋 <code>/votes</code> — quick-open indexed disputes",
+      "📎 <code>/invite</code> — your referral link + Mini App vote link",
+      "📜 <code>/petition</code> — create a community petition (DM wizard); <code>/petition_cancel</code>",
       "🔐 <code>/wallet</code> — vault; <code>/wallet balances</code>; <code>/wallet withdraw eth|poly</code> then <code>0x… amountWei|MAX</code>; deposit = send to vault addr",
       "🧙 <code>/vote</code> · <code>/reveal</code> — vault commit / reveal wizard",
       "🔔 <code>/alerts_on</code> · <code>/alerts_off</code> — dispute pings + digest",
       "",
-      "👮 <b>Groups</b> <code>/pin_vote_alert</code> · <code>/squad</code>",
+      "👮 <b>Groups</b> <code>/pin_vote_alert</code> · <code>/squad</code> · <code>/relay_on</code> / <code>/relay_off</code> (admins: post new dispute batches here)",
+      "",
+      "<b>Inline mode:</b> in any chat, type your bot’s username then <code>vote</code> (enable Inline in @BotFather) to share Mini App cards.",
       "",
       "💜 Disputes often on <b>Polygon</b> OO · ⛓ DVM vote on <b>Ethereum</b>",
       "",
@@ -514,16 +820,24 @@ bot.command("pin_vote_alert", async (ctx) => {
     .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
     .row();
   if (webAppUrl) {
+    kb.webApp("🔍 Mini App — search & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
     kb.webApp("📱 Mini App home", webAppUrl).row();
-    kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
   }
+  const un = botUsername.replace(/^@/, "");
+  const addBotLine =
+    un.length > 0
+      ? `\n📣 <b>Add this bot:</b> <a href="https://t.me/${escapeHtml(un)}">t.me/${escapeHtml(un)}</a>`
+      : "";
   const msg = await ctx.reply(
     [
       "🗳 <b>UMA DVM vote window</b>",
       "Commit / reveal on <b>vote.umaproject.org</b> (Ethereum).",
       "",
-      "🔍 Mini App: paste a Polymarket link or search, then vote.",
-    ].join("\n"),
+      "🔍 <b>Mini App:</b> open Search — paste a Polymarket link or pick an indexed dispute, then vote.",
+      addBotLine,
+    ]
+      .filter(Boolean)
+      .join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
   );
   try {
@@ -564,6 +878,70 @@ bot.command("squad", async (ctx) => {
     ].join("\n"),
     { parse_mode: "HTML" }
   );
+});
+
+async function requireRelayAdmin(ctx: Context): Promise<boolean> {
+  const chat = ctx.chat;
+  const uid = ctx.from?.id;
+  if (!chat || uid == null) return false;
+  if (chat.type !== "group" && chat.type !== "supergroup" && chat.type !== "channel") {
+    await ctx.reply("Use relay commands in a group, supergroup, or channel where you are an admin.");
+    return false;
+  }
+  try {
+    const m = await ctx.api.getChatMember(chat.id, uid);
+    const ok = m.status === "creator" || m.status === "administrator";
+    if (!ok) await ctx.reply("Only admins can change relay settings.");
+    return ok;
+  } catch {
+    await ctx.reply("Could not verify your admin status.");
+    return false;
+  }
+}
+
+/** Opt-in: post new dispute indexer batches to this chat (same HTML as DM alerts). Digest stays DM-only. */
+bot.command("relay_on", async (ctx) => {
+  if (!(await ensureInternal(ctx))) return;
+  if (!(await requireRelayAdmin(ctx))) return;
+  const chat = ctx.chat!;
+  const title = "title" in chat ? chat.title : null;
+  const r = await internalJson("/api/internal/group-broadcast-set", {
+    chatId: String(chat.id),
+    enabled: true,
+    title,
+  });
+  if (!r.ok) {
+    await ctx.reply("Could not enable relay for this chat.");
+    return;
+  }
+  await ctx.reply(
+    [
+      "<b>Relay on.</b>",
+      "New disputed DVM batches from the indexer will be posted here (same summary as DM subscribers).",
+      "",
+      "Daily digest reminders stay <b>direct-message only</b>.",
+      "",
+      "<code>/relay_off</code> to stop.",
+    ].join("\n"),
+    { parse_mode: "HTML" }
+  );
+});
+
+bot.command("relay_off", async (ctx) => {
+  if (!(await ensureInternal(ctx))) return;
+  if (!(await requireRelayAdmin(ctx))) return;
+  const chat = ctx.chat!;
+  const title = "title" in chat ? chat.title : null;
+  const r = await internalJson("/api/internal/group-broadcast-set", {
+    chatId: String(chat.id),
+    enabled: false,
+    title,
+  });
+  if (!r.ok) {
+    await ctx.reply("Could not disable relay.");
+    return;
+  }
+  await ctx.reply("<b>Relay off.</b> This chat will no longer receive dispute batch posts.", { parse_mode: "HTML" });
 });
 
 async function replyVaultStatus(ctx: Context, uid: string) {
@@ -797,7 +1175,7 @@ bot.command("wallet", async (ctx) => {
 
 async function startVoteWizard(ctx: Context, uid: string) {
   await sendChatAction(ctx, "typing");
-  const res = await fetch(`${apiUrl}/api/votes?limit=8`);
+  const res = await fetch(`${apiUrl}/api/votes?limit=8&omitRequests=1`);
   if (!res.ok) {
     await ctx.reply("Could not load disputes from the API.");
     return;
@@ -1021,9 +1399,93 @@ bot.callbackQuery(/^vr:(\d+)$/, async (ctx) => {
   await ctx.reply(`<b>Reveal sent.</b>\n<code>${escapeHtml(j.txHash)}</code>`, { parse_mode: "HTML" });
 });
 
+bot.callbackQuery(/^petition_sign:([a-f0-9]+)$/i, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Recording signature…" });
+  const uid = String(ctx.from?.id ?? "");
+  const pid = ctx.match![1]!.toLowerCase();
+  if (!uid || !(await ensureInternal(ctx))) return;
+  const r = await internalJson("/api/internal/petition/sign", { telegramId: uid, petitionId: pid, comment: null });
+  if (!r.ok) {
+    const t = await r.text();
+    await ctx.reply(`Could not sign: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+    return;
+  }
+  const j = (await r.json()) as { signatureCount?: number };
+  await ctx.reply(`✅ Signed. Current signatures: <b>${j.signatureCount ?? "—"}</b>.`, { parse_mode: "HTML" });
+});
+
+bot.callbackQuery(/^petition_report:([a-f0-9]+)$/i, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Thanks — recorded." });
+  const uid = String(ctx.from?.id ?? "");
+  const pid = ctx.match![1]!.toLowerCase();
+  if (!uid || !(await ensureInternal(ctx))) return;
+  await internalJson("/api/internal/petition/report", { telegramId: uid, petitionId: pid }).catch(() => {});
+});
+
 bot.on("message:text", async (ctx, next) => {
   const uid = String(ctx.from?.id ?? "");
   if (!uid || ctx.chat?.type !== "private") return next();
+  const pDraft = petitionDraft.get(uid);
+  if (pDraft && !ctx.message.text.trim().startsWith("/")) {
+    const raw = ctx.message.text.trim();
+    if (!(await ensureInternal(ctx))) return;
+    if (pDraft.step === "title") {
+      if (!raw) {
+        await ctx.reply("Send a non-empty title.");
+        return;
+      }
+      if (raw.length > 120) {
+        await ctx.reply("Title is too long (max 120 characters for this wizard).");
+        return;
+      }
+      petitionDraft.set(uid, { step: "body", title: raw });
+      await ctx.reply(
+        [
+          "Now send the <b>petition body</b> (one message).",
+          "",
+          "<code>/petition_cancel</code> to abort.",
+        ].join("\n"),
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    if (pDraft.step === "body") {
+      if (!raw) {
+        await ctx.reply("Send a non-empty body.");
+        return;
+      }
+      const title = pDraft.title ?? "";
+      const r = await internalJson("/api/internal/petition/create", {
+        telegramId: uid,
+        title,
+        body: raw,
+      });
+      petitionDraft.delete(uid);
+      if (!r.ok) {
+        const t = await r.text();
+        await ctx.reply(`Create failed: ${escapeHtml(t)}`, { parse_mode: "HTML" });
+        return;
+      }
+      const j = (await r.json()) as { id?: string };
+      const pid = (j.id ?? "").trim().toLowerCase();
+      const me = await ctx.api.getMe();
+      const un = (botUsername || me.username || "").replace(/^@/, "");
+      const link = un ? `https://t.me/${un}?start=petition_${encodeURIComponent(pid)}` : "";
+      await ctx.reply(
+        [
+          "✅ <b>Petition created</b>",
+          pid ? `\n<code>${escapeHtml(pid)}</code>` : "",
+          "",
+          link ? `Share: <a href="${escapeHtml(link)}">${escapeHtml(link)}</a>` : "Set PUBLIC_BOT_USERNAME for a stable share link.",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        { parse_mode: "HTML" }
+      );
+      if (pid) await replyPetitionCard(ctx, pid);
+      return;
+    }
+  }
   const wd = vaultWithdrawWait.get(uid);
   if (wd && !ctx.message.text.trim().startsWith("/")) {
     vaultWithdrawWait.delete(uid);
@@ -1132,6 +1594,38 @@ async function runDisputeBatchAlerts() {
       console.error("dispute batch alert failed", id, e);
     }
   }
+  const groupsRes = await fetch(
+    `${apiUrl}/api/cron/group-broadcast-chats?secret=${encodeURIComponent(cronSecret)}`
+  );
+  let groupIds: string[] = [];
+  if (groupsRes.ok) {
+    try {
+      const gj = (await groupsRes.json()) as { chatIds?: string[] };
+      groupIds = gj.chatIds ?? [];
+    } catch {
+      groupIds = [];
+    }
+  }
+  for (const chatId of groupIds) {
+    try {
+      await bot.api.sendMessage(chatId, data.batch.html, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+      });
+    } catch (e: unknown) {
+      const code =
+        typeof e === "object" && e !== null && "error_code" in e ? (e as { error_code: number }).error_code : 0;
+      if (code === 403 || code === 400) {
+        await internalJson("/api/internal/group-broadcast-set", {
+          chatId: String(chatId),
+          enabled: false,
+          title: null,
+        }).catch(() => {});
+      }
+      console.error("group relay failed", chatId, e);
+    }
+    await sleep(GROUP_RELAY_DELAY_MS);
+  }
   await fetch(
     `${apiUrl}/api/cron/dispute-alerts-mark?secret=${encodeURIComponent(cronSecret)}`,
     {
@@ -1201,6 +1695,7 @@ async function main() {
     onStart: (info) => {
       console.log(`Bot @${info.username} running (polling). Mini App: ${webAppUrl || "(set WEB_APP_URL)"}`);
       console.log(`API_PUBLIC_URL=${apiUrl}`);
+      console.log("Enable Inline mode in @BotFather (/setinline) for @-mention vote sharing in any chat.");
       if (!internalSecret) console.warn("INTERNAL_API_SECRET is empty — /wallet, /vote, alerts will fail");
       if (!webAppUrl) console.warn("WEB_APP_URL is empty — Web App menu buttons will be missing");
       if (botUsername && info.username !== botUsername) {
