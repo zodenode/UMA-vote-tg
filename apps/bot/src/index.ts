@@ -12,6 +12,9 @@ const apiUrl = (process.env.API_PUBLIC_URL ?? "http://localhost:8787").replace(/
 const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
 const botUsername = process.env.PUBLIC_BOT_USERNAME ?? "";
+/** Optional HTTPS URL or Telegram file_id for / start welcome image (caption uses HTML). */
+const welcomePhotoUrl = process.env.WELCOME_PHOTO_URL?.trim();
+const welcomePhotoFileId = process.env.WELCOME_PHOTO_FILE_ID?.trim();
 
 const bot = new Bot(token);
 
@@ -22,18 +25,81 @@ function webAppUrlWithStartParam(base: string, startapp: string): string {
   return `${b}${join}startapp=${encodeURIComponent(startapp)}`;
 }
 
-function mainKeyboard() {
+function welcomeCaptionHtml(): string {
+  return [
+    "<b>uma.vote</b>",
+    "",
+    "Swap into <b>UMA</b>, track DVM rounds, and <b>vote</b> (Mini App + wallet). Use <code>/votes</code> for per-dispute buttons.",
+    "",
+    "<b>Tip:</b> open the Mini App or tap <b>Vote from bot</b> below.",
+    "",
+    "<i>Not affiliated with the UMA Foundation — see docs.uma.xyz</i>",
+  ].join("\n");
+}
+
+function mainMenuKeyboard(alertsOn: boolean) {
   const kb = new InlineKeyboard();
   if (webAppUrl) {
-    kb.webApp("Open Mini App", webAppUrl).row();
-    kb.webApp("Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("📱 Open Mini App", webAppUrl).row();
+    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
   }
-  kb.text("Vote from bot", "vote_list").row();
-  kb.text("Vault (custody)", "vault_menu").row();
-  kb.text("Alerts: On", "alerts_on").text("Alerts: Off", "alerts_off").row();
-  kb.url("Open voter dApp", "https://vote.umaproject.org/").row();
-  kb.text("Help", "help");
+  kb.text("📋 Vote from bot", "vote_list").row();
+  kb.text("🔐 Vault (custody)", "vault_menu").row();
+  kb.text(alertsOn ? "🔔 ON ✓" : "🔔 On", "alerts_on").text(alertsOn ? "🔕 Off" : "🔕 OFF ✓", "alerts_off").row();
+  kb.url("🌐 Official voter dApp", "https://vote.umaproject.org/").row();
+  kb.text("❓ Help", "help").text("🔄 Refresh", "menu_home").row();
   return kb;
+}
+
+function isMainMenuMessage(msg: unknown): boolean {
+  if (!msg || typeof msg !== "object") return false;
+  const m = msg as { reply_markup?: { inline_keyboard?: { callback_data?: string }[][] } };
+  const rows = m.reply_markup?.inline_keyboard;
+  if (!rows) return false;
+  return rows.flat().some((b) => b.callback_data === "help" || b.callback_data === "menu_home");
+}
+
+async function getAlertsOn(telegramId: string): Promise<boolean> {
+  if (!internalSecret || !telegramId) return false;
+  const r = await internalJson("/api/internal/ensure-user", {
+    telegramId,
+    username: undefined,
+    ref: null,
+  }).catch(() => null);
+  if (!r?.ok) return false;
+  try {
+    const j = (await r.json()) as { alertsOn?: boolean };
+    return Boolean(j.alertsOn);
+  } catch {
+    return false;
+  }
+}
+
+async function sendChatAction(ctx: Context, action: "typing" | "upload_photo") {
+  const id = ctx.chat?.id;
+  if (id != null) await ctx.api.sendChatAction(id, action).catch(() => {});
+}
+
+async function refreshMainMenuFromCallback(ctx: Context) {
+  const uid = String(ctx.from?.id ?? "");
+  const alertsOn = await getAlertsOn(uid);
+  const kb = mainMenuKeyboard(alertsOn);
+  const msg = ctx.callbackQuery?.message;
+  if (!msg) return;
+  try {
+    if ("photo" in msg && msg.photo?.length) {
+      await ctx.editMessageCaption({
+        caption: welcomeCaptionHtml(),
+        parse_mode: "HTML",
+        reply_markup: kb,
+      });
+    } else {
+      await ctx.editMessageText(welcomeCaptionHtml(), { parse_mode: "HTML", reply_markup: kb });
+    }
+  } catch (e) {
+    console.warn("refreshMainMenu edit failed", e);
+    await ctx.reply(welcomeCaptionHtml(), { parse_mode: "HTML", reply_markup: kb });
+  }
 }
 
 function escapeHtml(s: string): string {
@@ -47,6 +113,9 @@ async function replyVotePicker(ctx: Context) {
     await ctx.reply("Mini App URL is not configured (set WEB_APP_URL on the bot).");
     return;
   }
+  await sendChatAction(ctx, "typing");
+  const uid = String(ctx.from?.id ?? "");
+  const alertsOn = await getAlertsOn(uid);
   const res = await fetch(`${apiUrl}/api/votes?limit=8`);
   if (!res.ok) {
     await ctx.reply("Could not load disputes from the API. Check API_PUBLIC_URL and the API service.");
@@ -62,7 +131,7 @@ async function replyVotePicker(ctx: Context) {
         "",
         "Open the Mini App for the full DVM list (including subgraph requests).",
       ].join("\n"),
-      { parse_mode: "HTML", reply_markup: mainKeyboard() }
+      { parse_mode: "HTML", reply_markup: mainMenuKeyboard(alertsOn) }
     );
     return;
   }
@@ -76,6 +145,7 @@ async function replyVotePicker(ctx: Context) {
     kb.webApp(label, webAppUrlWithStartParam(webAppUrl, startapp)).row();
   }
   kb.webApp("All votes & swap", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  kb.text("« Main menu", "menu_home").row();
   const lines = disputes.map(
     (d, i) => `${i + 1}. ${escapeHtml(d.source)} · chain ${d.chainId}`
   );
@@ -202,25 +272,31 @@ async function ensureInternal(ctx: Context): Promise<boolean> {
 bot.command("start", async (ctx) => {
   const ref = parseRefFromStart(ctx.message?.text);
   const uid = String(ctx.from?.id ?? "");
+  let alertsOn = false;
   if (uid && internalSecret) {
-    await internalJson("/api/internal/ensure-user", {
+    const r = await internalJson("/api/internal/ensure-user", {
       telegramId: uid,
       username: ctx.from?.username,
       ref,
-    }).catch(() => {});
+    }).catch(() => null);
+    if (r?.ok) {
+      try {
+        const j = (await r.json()) as { alertsOn?: boolean };
+        alertsOn = Boolean(j.alertsOn);
+      } catch {
+        alertsOn = false;
+      }
+    }
   }
-  await ctx.reply(
-    [
-      "<b>uma.vote</b>",
-      "",
-      "Swap into <b>UMA</b>, track DVM rounds, and <b>vote</b> (Mini App + wallet). Use <code>/votes</code> for per-dispute buttons.",
-      "",
-      "<b>Tip:</b> open the Mini App or tap <b>Vote from bot</b> below.",
-      "",
-      "<i>Not affiliated with the UMA Foundation — see docs.uma.xyz</i>",
-    ].join("\n"),
-    { parse_mode: "HTML", reply_markup: mainKeyboard() }
-  );
+  const kb = mainMenuKeyboard(alertsOn);
+  const cap = welcomeCaptionHtml();
+  const photo = welcomePhotoUrl || welcomePhotoFileId;
+  if (photo) {
+    await sendChatAction(ctx, "upload_photo");
+    await ctx.replyWithPhoto(photo, { caption: cap, parse_mode: "HTML", reply_markup: kb });
+  } else {
+    await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
+  }
 });
 
 bot.command("votes", async (ctx) => {
@@ -228,6 +304,8 @@ bot.command("votes", async (ctx) => {
 });
 
 bot.command("help", async (ctx) => {
+  const uid = String(ctx.from?.id ?? "");
+  const alertsOn = await getAlertsOn(uid);
   await ctx.reply(
     [
       "<b>Commands</b>",
@@ -253,22 +331,16 @@ bot.command("help", async (ctx) => {
       "<b>Coming soon</b>",
       "Discord login — connect Discord to auto-post vote reminders in your server.",
     ].join("\n"),
-    { parse_mode: "HTML", reply_markup: mainKeyboard() }
+    { parse_mode: "HTML", reply_markup: mainMenuKeyboard(alertsOn) }
   );
 });
 
-async function setAlerts(
-  ctx: {
-    from?: { id: number };
-    chat?: { id: number; type: string; title?: string };
-    reply: (text: string, extra?: object) => Promise<unknown>;
-  },
-  on: boolean
-) {
+async function setAlerts(ctx: Context, on: boolean) {
   const uid = ctx.from?.id;
   if (!uid) return;
   if (!internalSecret) {
-    await ctx.reply("Server misconfigured: missing INTERNAL_API_SECRET on bot/API.");
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "Server misconfigured", show_alert: true });
+    else await ctx.reply("Server misconfigured: missing INTERNAL_API_SECRET on bot/API.");
     return;
   }
   const res = await internalJson("/api/internal/alerts", {
@@ -276,7 +348,8 @@ async function setAlerts(
     alertsOn: on,
   });
   if (!res.ok) {
-    await ctx.reply("Could not update alerts. Is the API running?");
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "Could not update alerts", show_alert: true });
+    else await ctx.reply("Could not update alerts. Is the API running?");
     return;
   }
   const chat = ctx.chat;
@@ -287,11 +360,32 @@ async function setAlerts(
       delta: on ? 1 : -1,
     }).catch(() => {});
   }
+  const kb = mainMenuKeyboard(on);
+  const msg = ctx.callbackQuery?.message;
+  if (ctx.callbackQuery && msg && isMainMenuMessage(msg as unknown)) {
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: kb });
+    } catch (e) {
+      console.warn("alerts: editMessageReplyMarkup failed", e);
+    }
+    await ctx.answerCallbackQuery({ text: on ? "🔔 Alerts on" : "🔕 Alerts off" });
+    return;
+  }
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery({ text: on ? "🔔 Alerts on" : "🔕 Alerts off" });
+    await ctx.reply(
+      on
+        ? "<b>Alerts on.</b> At most one digest per day while votes are active."
+        : "<b>Alerts off.</b>",
+      { parse_mode: "HTML", reply_markup: kb }
+    );
+    return;
+  }
   await ctx.reply(
     on
       ? "<b>Alerts on.</b> At most one digest per day while votes are active."
       : "<b>Alerts off.</b>",
-    { parse_mode: "HTML", reply_markup: mainKeyboard() }
+    { parse_mode: "HTML", reply_markup: kb }
   );
 }
 
@@ -300,22 +394,31 @@ bot.command("alerts_off", async (ctx) => setAlerts(ctx, false));
 
 bot.callbackQuery("alerts_on", async (ctx) => {
   await setAlerts(ctx, true);
-  await ctx.answerCallbackQuery();
 });
 bot.callbackQuery("alerts_off", async (ctx) => {
   await setAlerts(ctx, false);
-  await ctx.answerCallbackQuery();
 });
 bot.callbackQuery("help", async (ctx) => {
   await ctx.answerCallbackQuery();
+  const uid = String(ctx.from?.id ?? "");
+  const alertsOn = await getAlertsOn(uid);
   await ctx.reply(
     "Use /help for full commands. Mini App: Swap, Votes, Account. Try /votes to vote via Web App buttons.",
-    { reply_markup: mainKeyboard() }
+    { reply_markup: mainMenuKeyboard(alertsOn) }
   );
 });
 
+bot.callbackQuery("menu_home", async (ctx) => {
+  try {
+    await refreshMainMenuFromCallback(ctx);
+    await ctx.answerCallbackQuery({ text: "Main menu" });
+  } catch {
+    await ctx.answerCallbackQuery({ text: "Use /start", show_alert: true });
+  }
+});
+
 bot.callbackQuery("vote_list", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await ctx.answerCallbackQuery({ text: "Loading disputes…" });
   await replyVotePicker(ctx);
 });
 
@@ -444,11 +547,13 @@ async function replyVaultStatus(ctx: Context, uid: string) {
     if (!st.exportedOnce) kb.text("Export key (once)", "vault_export").row();
   }
   kb.text("Vote wizard", "vote_vault_start").text("Reveal", "reveal_vault_start").row();
+  kb.text("« Main menu", "menu_home").row();
   await ctx.reply(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
 bot.callbackQuery("vault_menu", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await ctx.answerCallbackQuery({ text: "Vault…" });
+  await sendChatAction(ctx, "typing");
   const uid = String(ctx.from?.id ?? "");
   if (!uid) return;
   if (!(await ensureInternal(ctx))) return;
@@ -546,6 +651,7 @@ bot.command("wallet", async (ctx) => {
 });
 
 async function startVoteWizard(ctx: Context, uid: string) {
+  await sendChatAction(ctx, "typing");
   const res = await fetch(`${apiUrl}/api/votes?limit=8`);
   if (!res.ok) {
     await ctx.reply("Could not load disputes from the API.");
@@ -570,7 +676,7 @@ async function startVoteWizard(ctx: Context, uid: string) {
   for (let i = 0; i < disputes.length; i++) {
     kb.text(String(i + 1), `vw:${i}`).row();
   }
-  kb.text("Cancel", "vw_cancel").row();
+  kb.text("« Main menu", "menu_home").text("Cancel", "vw_cancel").row();
   await ctx.reply(
     [
       "<b>Vote with vault</b>",
@@ -597,7 +703,7 @@ bot.command("vote", async (ctx) => {
 });
 
 bot.callbackQuery("vote_vault_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await ctx.answerCallbackQuery({ text: "Loading wizard…" });
   const uid = String(ctx.from?.id ?? "");
   if (!uid) return;
   if (!(await ensureInternal(ctx))) return;
@@ -605,7 +711,7 @@ bot.callbackQuery("vote_vault_start", async (ctx) => {
 });
 
 bot.callbackQuery("vw_cancel", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await ctx.answerCallbackQuery({ text: "Cancelled" });
   const uid = String(ctx.from?.id ?? "");
   if (uid) await saveWizardSession(uid, "idle", {});
   await ctx.reply("Vote wizard cancelled.");
@@ -699,6 +805,7 @@ bot.callbackQuery(/^vwpr:(prop|0|1e18|custom)$/, async (ctx) => {
 });
 
 async function startRevealFlow(ctx: Context, uid: string) {
+  await sendChatAction(ctx, "typing");
   const r = await internalGet(
     `/api/internal/vault/pending-commits?telegramId=${encodeURIComponent(uid)}`
   );
@@ -720,7 +827,7 @@ async function startRevealFlow(ctx: Context, uid: string) {
   });
   const kb = new InlineKeyboard();
   for (let i = 0; i < pending.length; i++) kb.text(`Reveal ${i + 1}`, `vr:${i}`).row();
-  kb.text("Cancel", "vw_cancel").row();
+  kb.text("« Main menu", "menu_home").text("Cancel", "vw_cancel").row();
   await ctx.reply(
     ["<b>Reveal with vault</b>", "", ...lines, "", "Pick which commit to reveal (reveal phase only)."].join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
@@ -738,7 +845,7 @@ bot.command("reveal", async (ctx) => {
 });
 
 bot.callbackQuery("reveal_vault_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await ctx.answerCallbackQuery({ text: "Reveal flow…" });
   const uid = String(ctx.from?.id ?? "");
   if (!uid) return;
   if (!(await ensureInternal(ctx))) return;

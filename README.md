@@ -10,13 +10,14 @@ Telegram bot + Mini App focused on **Polygon** prediction-market **OOv2 disputes
 | ---------- | ------------------------------------------------ |
 | `apps/web` | Vite + React Mini App (tabs, theme, swap, votes) |
 | `apps/api` | Fastify API, SQLite, subgraph + 0x proxy         |
-| `apps/bot` | Grammy bot: `/start`, alerts, group commands     |
+| `apps/bot` | Grammy bot: `/start` (optional welcome photo), inline menus, alerts, group commands |
 
 ## Quick start
 
 1. Copy [`.env.example`](.env.example) to `.env` in the repo root (or set env per process). You need at least:
 
    - `BOT_TOKEN`, `WEB_APP_URL`, `API_PUBLIC_URL`, `INTERNAL_API_SECRET`, `CRON_SECRET`
+   - Optional **`WELCOME_PHOTO_URL`** (HTTPS) or **`WELCOME_PHOTO_FILE_ID`** (Telegram file id) on the **bot** for a richer `/start` (photo + HTML caption + inline menu)
    - `THEGRAPH_API_KEY` (recommended; see [UMA subgraph docs](https://docs.uma.xyz/resources/subgraph-data)). If The Graph fails or the key is unset, **`ETH_RPC_URL`** powers an on-chain **Active DVM price requests** list (`RequestAdded` + `getPriceRequestStatuses`).
    - `POLYGON_RPC_URL` for **Polygon** OOv2 `DisputePrice` indexing (pre-filled in `.env.example` with a public RPC from [chainlist.org](https://chainlist.org) / [ethereum-lists/chains](https://github.com/ethereum-lists/chains))
    - `ETH_RPC_URL` for **VotingV2** commit/reveal countdowns, **Ethereum** OOv2 `DisputePrice` indexing, and the DVM request RPC fallback above (same — default PublicNode URL in `.env.example`; use Alchemy/Infura in production)
