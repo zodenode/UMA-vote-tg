@@ -12,6 +12,8 @@ const apiUrl = (process.env.API_PUBLIC_URL ?? "http://localhost:8787").replace(/
 const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
 const botUsername = process.env.PUBLIC_BOT_USERNAME ?? "";
+/** Inline-keyboard `switch_inline` requires @BotFather → Inline mode ON; otherwise Telegram rejects the whole message and /start looks “dead”. */
+const inlineShareEnabled = /^1|true|yes$/i.test(process.env.BOT_INLINE_SHARE?.trim() ?? "");
 /** Optional HTTPS URL or Telegram file_id for / start welcome image (caption uses HTML). */
 const welcomePhotoUrl = process.env.WELCOME_PHOTO_URL?.trim();
 const welcomePhotoFileId = process.env.WELCOME_PHOTO_FILE_ID?.trim();
@@ -29,9 +31,15 @@ bot.catch((err) => {
  */
 async function clearWebhookForPolling() {
   try {
+    const before = await bot.api.getWebhookInfo();
+    if (before.url) {
+      console.log(`[boot] Webhook active (${before.url}) — deleting so long polling receives updates`);
+    }
     await bot.api.deleteWebhook({ drop_pending_updates: false });
+    const after = await bot.api.getWebhookInfo();
+    if (after.url) console.warn(`[boot] Webhook URL still set after deleteWebhook: ${after.url}`);
   } catch (e) {
-    console.warn("deleteWebhook failed (continuing):", e);
+    console.warn("deleteWebhook / getWebhookInfo failed (continuing):", e);
   }
 }
 
@@ -72,7 +80,9 @@ function mainMenuKeyboard(alertsOn: boolean) {
     kb.webApp("📱 Mini App (home)", webAppUrl).row();
   }
   kb.text("📋 Indexed disputes", "vote_list").row();
-  kb.switchInline("📣 Share dispute search…", "vote ").row();
+  if (inlineShareEnabled) {
+    kb.switchInline("📣 Share dispute search…", "vote ").row();
+  }
   kb.text(alertsOn ? "🔔 Alerts ON" : "🔔 Alerts off", "alerts_on").text(alertsOn ? "🔕 Turn off" : "🔕 Turn on", "alerts_off").row();
   kb.text("⚙️ More · vault & links", "menu_more").row();
   return kb;
@@ -188,7 +198,9 @@ async function replyVotePicker(ctx: Context) {
     kb.webApp(label, webAppUrlWithStartParam(webAppUrl, startapp)).row();
   }
   kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-  kb.switchInline("📣 Share in any chat…", "vote ").row();
+  if (inlineShareEnabled) {
+    kb.switchInline("📣 Share in any chat…", "vote ").row();
+  }
   kb.text("« 🏠 Home", "menu_home").row();
   await ctx.reply(
     [
@@ -545,27 +557,30 @@ bot.on("inline_query", async (ctx) => {
 });
 
 bot.command("start", async (ctx) => {
-  const ref = parseRefFromStart(ctx.message?.text);
-  const petitionId = parsePetitionFromStart(ctx.message?.text);
-  const uid = String(ctx.from?.id ?? "");
-  let alertsOn = false;
-  if (uid && internalSecret) {
-    const r = await internalJson("/api/internal/ensure-user", {
-      telegramId: uid,
-      username: ctx.from?.username,
-      ref,
-    }).catch(() => null);
-    if (r?.ok) {
-      try {
-        const j = (await r.json()) as { alertsOn?: boolean };
-        alertsOn = Boolean(j.alertsOn);
-      } catch {
-        alertsOn = false;
+  try {
+    const ref = parseRefFromStart(ctx.message?.text);
+    const petitionId = parsePetitionFromStart(ctx.message?.text);
+    const uid = String(ctx.from?.id ?? "");
+    let alertsOn = false;
+    if (uid && internalSecret) {
+      const r = await internalJson("/api/internal/ensure-user", {
+        telegramId: uid,
+        username: ctx.from?.username,
+        ref,
+      }).catch(() => null);
+      if (r?.ok) {
+        try {
+          const j = (await r.json()) as { alertsOn?: boolean };
+          alertsOn = Boolean(j.alertsOn);
+        } catch {
+          alertsOn = false;
+        }
       }
     }
-  }
-  if (petitionId) {
-    await replyPetitionCard(ctx, petitionId, { withHomeRow: true });
+    if (petitionId) {
+      await replyPetitionCard(ctx, petitionId, { withHomeRow: true });
+      return;
+    }
     const kb = mainMenuKeyboard(alertsOn);
     const cap = welcomeCaptionHtml();
     const photo = welcomePhotoUrl || welcomePhotoFileId;
@@ -575,16 +590,15 @@ bot.command("start", async (ctx) => {
     } else {
       await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
     }
-    return;
-  }
-  const kb = mainMenuKeyboard(alertsOn);
-  const cap = welcomeCaptionHtml();
-  const photo = welcomePhotoUrl || welcomePhotoFileId;
-  if (photo) {
-    await sendChatAction(ctx, "upload_photo");
-    await ctx.replyWithPhoto(photo, { caption: cap, parse_mode: "HTML", reply_markup: kb });
-  } else {
-    await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
+  } catch (e) {
+    console.error("/start handler failed:", e);
+    try {
+      await ctx.reply(
+        "Could not show the welcome menu (see bot logs). Common fixes: redeploy the bot worker, clear any Telegram webhook, and set BOT_INLINE_SHARE=1 only if Inline mode is enabled in @BotFather."
+      );
+    } catch (replyErr) {
+      console.error("/start fallback reply also failed:", replyErr);
+    }
   }
 });
 
@@ -1695,7 +1709,11 @@ async function main() {
     onStart: (info) => {
       console.log(`Bot @${info.username} running (polling). Mini App: ${webAppUrl || "(set WEB_APP_URL)"}`);
       console.log(`API_PUBLIC_URL=${apiUrl}`);
-      console.log("Enable Inline mode in @BotFather (/setinline) for @-mention vote sharing in any chat.");
+      console.log(
+        inlineShareEnabled
+          ? "BOT_INLINE_SHARE on — share buttons use switch_inline (Inline mode must be ON in @BotFather)."
+          : "BOT_INLINE_SHARE off — no switch_inline buttons (safe default; set BOT_INLINE_SHARE=1 after /setinline)."
+      );
       if (!internalSecret) console.warn("INTERNAL_API_SECRET is empty — /wallet, /vote, alerts will fail");
       if (!webAppUrl) console.warn("WEB_APP_URL is empty — Web App menu buttons will be missing");
       if (botUsername && info.username !== botUsername) {
