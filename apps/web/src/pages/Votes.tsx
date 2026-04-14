@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import DvmInlineVote from "../components/DvmInlineVote";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { apiGet } from "../api";
 import MarketDisputeFinder from "../components/MarketDisputeFinder";
 import VaultCustodialPanel from "../components/VaultCustodialPanel";
 import VotesWalletBar from "../components/VotesWalletBar";
 import { encodeVoteFocusToken } from "../voteFocusToken";
-import type { Dispute, VotesPayload } from "../voteTypes";
-import { disputeTitle, formatDuration } from "../voteUtils";
+import type { Dispute, VoteReq, VotesPayload } from "../voteTypes";
+import { disputeTitle, formatDuration, identifierToHex } from "../voteUtils";
 
 export default function Votes() {
   const navigate = useNavigate();
@@ -32,15 +33,14 @@ export default function Votes() {
     );
   }
 
+  /** Inline commit/reveal for a row from Active DVM votes (URLs cannot carry large ancillary payloads). */
+  const [activeVoteReq, setActiveVoteReq] = useState<VoteReq | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [source, setSource] = useState<string>("");
   /** Default all chains so Ethereum + Polygon disputes both show (Polygon-only filter hid mainnet rows). */
   const [chain, setChain] = useState<string>("");
   const [topic, setTopic] = useState<string>("");
   const [minBond, setMinBond] = useState<string>("");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [openReqId, setOpenReqId] = useState<string | null>(null);
-
   const queryString = useMemo(() => {
     const p = new URLSearchParams();
     p.set("limit", "30");
@@ -96,13 +96,16 @@ export default function Votes() {
     <>
       <h1>Vote on a dispute</h1>
       <p className="muted">
-        Search for your <b>Polymarket</b>, then open <b>Vote</b> to see timing and commit/reveal. Everything else is optional.
+        <b>Active DVM votes</b> are live <code>VotingV2</code> requests (same pool as vote.uma.xyz). <b>Open disputes</b>{" "}
+        are only OO <code>DisputePrice</code> rows we have indexed — a smaller set. Search finds Polymarket markets linked
+        to disputes.
       </p>
       <details className="votes-technical">
         <summary className="votes-technical-summary">How data loads (technical)</summary>
         <p className="muted" style={{ marginTop: 8 }}>
-          <b>Disputes</b> come from indexed <code>DisputePrice</code> events. <b>DVM timing</b> is from Ethereum{" "}
-          <code>VotingV2</code>. Active price requests can load via The Graph or <code>ETH_RPC_URL</code> fallback.
+          <b>Active DVM votes</b> load from The Graph or <code>ETH_RPC_URL</code> log scan. <b>Open disputes</b> come from
+          indexed <code>DisputePrice</code> events on Polygon/Ethereum OOv2. <b>DVM timing</b> is from{" "}
+          <code>VotingV2</code>.
         </p>
       </details>
 
@@ -121,7 +124,7 @@ export default function Votes() {
             Round ends (UTC): {new Date(dvm.roundEndsAt * 1000).toLocaleString()}
           </p>
           <p className="muted" style={{ margin: "10px 0 0", fontSize: 13 }}>
-            Open a dispute below to commit or reveal in this app.
+            Pick an <b>Active DVM vote</b> or an indexed dispute below to commit or reveal in this app.
           </p>
         </div>
       ) : (
@@ -134,11 +137,73 @@ export default function Votes() {
 
       <VaultCustodialPanel apiVaultEnabled={Boolean(data.vaultEnabled)} />
 
-      <h2>Open disputes</h2>
+      <h2>Active DVM votes</h2>
+      <p className="muted" style={{ marginTop: 4 }}>
+        Unresolved requests on Ethereum <code>VotingV2</code> — tap <b>Vote in app</b> to open commit/reveal here (same
+        flow as other UMA voters). Custodial vault voting still uses an indexed dispute row.
+      </p>
+      {list.length === 0 ? (
+        <div className="card">
+          <p className="muted">
+            No active DVM price requests right now, or the API cannot load them (set <code>THEGRAPH_API_KEY</code> and/or{" "}
+            <code>ETH_RPC_URL</code> on the API).
+          </p>
+        </div>
+      ) : (
+        list.map((r: VoteReq) => (
+          <div key={r.id} className="card votes-active-preview">
+            <div className="votes-active-preview-head">
+              <h3 className="votes-active-preview-title">{r.identifierId}</h3>
+              <span className="badge">Round {r.roundId ?? "—"}</span>
+            </div>
+            <p className="muted" style={{ margin: "8px 0 0", fontSize: 13 }}>
+              Requested: {new Date(Number(r.time) * 1000).toLocaleString()}
+              {r.participationPct != null ? ` · Participation ${r.participationPct}%` : ""}
+            </p>
+            <button
+              type="button"
+              className={
+                activeVoteReq?.id === r.id
+                  ? "btn btn-secondary btn-press votes-dispute-vote-cta"
+                  : "btn btn-primary btn-press votes-dispute-vote-cta"
+              }
+              style={{ marginTop: 12 }}
+              onClick={() => setActiveVoteReq((cur) => (cur?.id === r.id ? null : r))}
+            >
+              {activeVoteReq?.id === r.id ? "Close" : "Vote in app"}
+            </button>
+          </div>
+        ))
+      )}
+
+      {activeVoteReq ? (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3 style={{ marginTop: 0 }}>Commit / reveal</h3>
+          <p className="muted" style={{ fontSize: 13 }}>
+            {activeVoteReq.identifierId} · requested {new Date(Number(activeVoteReq.time) * 1000).toLocaleString()}
+          </p>
+          <DvmInlineVote
+            identifier={identifierToHex(activeVoteReq.identifierId)}
+            time={activeVoteReq.time}
+            ancillaryData={activeVoteReq.ancillaryData ?? "0x"}
+            proposedPrice={null}
+            dvm={dvm}
+            vaultDisputeKey={null}
+            vaultSigningEnabled={Boolean(data.vaultEnabled)}
+          />
+        </div>
+      ) : null}
+
+      <h2 style={{ marginTop: 28 }}>Open disputes</h2>
+      <p className="muted" style={{ marginTop: 4 }}>
+        Oracle disputes we indexed from <code>DisputePrice</code> (Polygon/Eth). The same market can already be an{" "}
+        <b>Active DVM vote</b> above even if it does not appear here yet.
+      </p>
       {disputes.length === 0 ? (
         <div className="card">
           <p className="muted">
-            No disputes in the index yet. Try the search box above, or wait for the indexer to pick up new disputes.
+            No rows in this index yet — check <b>Active DVM votes</b> above, use search, or wait for the API poller to
+            ingest new <code>DisputePrice</code> events.
           </p>
         </div>
       ) : (
@@ -199,7 +264,7 @@ export default function Votes() {
       >
         <summary className="votes-filters-summary">Filter dispute list</summary>
         <p className="muted" style={{ marginTop: 4 }}>
-          Narrow <b>Open disputes</b> above.
+          Narrow the <b>Open disputes</b> list below (not the Active DVM list).
         </p>
         <label className="muted" htmlFor="src">
           Source
@@ -271,62 +336,6 @@ export default function Votes() {
           </p>
         </div>
       ) : null}
-
-      <details
-        className="card votes-advanced"
-        open={advancedOpen}
-        onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
-      >
-        <summary className="votes-filters-summary">Advanced: all active DVM price requests</summary>
-        <p className="muted" style={{ marginTop: 4 }}>
-          Raw on-chain identifiers for unresolved DVM price requests. For most users, <b>Open disputes</b> and search are
-          enough.
-        </p>
-        {list.length === 0 ? (
-          <p className="muted" style={{ marginTop: 12 }}>
-            No unresolved requests right now, or Ethereum data is unavailable.
-          </p>
-        ) : (
-          list.map((r) => {
-            const expanded = openReqId === r.id;
-            return (
-              <div key={r.id} className="card" style={{ marginTop: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                  <strong>{r.identifierId}</strong>
-                  <span className="badge">Round {r.roundId ?? "—"}</span>
-                </div>
-                <p className="muted" style={{ marginTop: 8 }}>
-                  Requested: {new Date(Number(r.time) * 1000).toLocaleString()}
-                </p>
-                {r.participationPct != null ? <p className="muted">Participation: {r.participationPct}%</p> : null}
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-press"
-                  style={{ marginTop: 8 }}
-                  onClick={() => setOpenReqId(expanded ? null : r.id)}
-                >
-                  {expanded ? "Hide details" : "Details"}
-                </button>
-                {expanded ? (
-                  <pre
-                    className="muted"
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
-                      fontSize: 12,
-                      marginTop: 8,
-                    }}
-                  >
-                    id: {r.id}
-                    {"\n"}
-                    ancillary: {r.ancillaryData ?? "—"}
-                  </pre>
-                ) : null}
-              </div>
-            );
-          })
-        )}
-      </details>
 
       <button type="button" className="btn btn-secondary btn-press" style={{ marginTop: 16 }} onClick={() => q.refetch()}>
         Refresh

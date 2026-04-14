@@ -271,6 +271,28 @@ a.petitions-active-item:hover {
   object-fit: cover;
 }
 
+.votes-active-preview-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (min-width: 380px) {
+  .votes-active-preview-head {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+}
+
+.votes-active-preview-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
 .votes-dvm-strip-main {
   margin: 8px 0 0;
   font-size: 1rem;
