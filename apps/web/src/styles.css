@@ -293,6 +293,92 @@ a.petitions-active-item:hover {
   word-break: break-all;
 }
 
+.oo-disputes-teaser h2 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.oo-disputes-lead {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.oo-disputes-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.oo-disputes-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius, 8px);
+  border: 1px solid rgba(127, 127, 127, 0.18);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+@media (min-width: 420px) {
+  .oo-disputes-item {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
+.oo-disputes-item-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.oo-disputes-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--text);
+  margin-right: 6px;
+}
+
+.oo-disputes-title {
+  margin: 6px 0 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.oo-disputes-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+a.oo-disputes-cta {
+  flex-shrink: 0;
+  text-decoration: none;
+  text-align: center;
+  box-sizing: border-box;
+  align-self: flex-start;
+}
+
+.oo-disputes-footer {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
+.oo-disputes-footer a {
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .votes-dvm-strip-main {
   margin: 8px 0 0;
   font-size: 1rem;

@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import OODisputesTeaser from "../components/OODisputesTeaser";
 
 export default function Home() {
   return (
@@ -21,6 +22,11 @@ export default function Home() {
           </Link>
         </div>
       </div>
+
+      <div style={{ marginTop: 16 }}>
+        <OODisputesTeaser heading="Indexed oracle disputes" />
+      </div>
+
       <p className="muted" style={{ marginTop: 16 }}>
         Docs:{" "}
         <a href="https://docs.uma.xyz/community/governance" target="_blank" rel="noreferrer">

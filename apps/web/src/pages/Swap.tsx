@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import OODisputesTeaser from "../components/OODisputesTeaser";
 import { formatUnits, parseEther } from "viem";
 import { polygon } from "wagmi/chains";
 import {
@@ -309,6 +310,10 @@ export default function Swap() {
           ) : null}
         </div>
       ) : null}
+
+      <div style={{ marginTop: 20 }}>
+        <OODisputesTeaser heading="Oracle disputes while you swap" className="fade-in-up" limit={5} />
+      </div>
     </div>
   );
 }

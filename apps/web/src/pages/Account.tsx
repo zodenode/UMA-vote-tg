@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import OODisputesTeaser from "../components/OODisputesTeaser";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { apiPost, getInitData, getTelegramChat } from "../api";
 import VaultCustodialPanel from "../components/VaultCustodialPanel";
@@ -112,6 +113,10 @@ export default function Account() {
             </button>
           </>
         )}
+      </div>
+
+      <div style={{ marginTop: 8 }}>
+        <OODisputesTeaser heading="Indexed OO disputes" limit={5} />
       </div>
 
       <div className="card">
