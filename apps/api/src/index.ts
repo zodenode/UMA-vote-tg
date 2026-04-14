@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { createHash, randomBytes } from "node:crypto";
 import type { Hex, PublicClient } from "viem";
-import { getAddress, isAddress, verifyMessage } from "viem";
+import { getAddress, isAddress, recoverMessageAddress } from "viem";
 import { openDb, getOrCreateUser } from "./db.js";
 import { verifyInitData, parseUserFromInitData } from "./telegramAuth.js";
 import { type PriceRequestSummary } from "./umaSubgraph.js";
@@ -399,16 +399,6 @@ app.get<{
     const chainFilter =
       chainQ === "1" || chainQ === "137" ? (chainQ as "1" | "137") : undefined;
     const omitRequests = req.query.omitRequests === "1" || req.query.omitRequests === "true";
-    let requests: PriceRequestSummary[] = [];
-    let subgraphError: string | undefined;
-    let requestsSource: "subgraph" | "rpc" | undefined;
-    if (!omitRequests) {
-      const loaded = await loadActivePriceRequests(graphKey, ethClient, 20);
-      requests = loaded.requests;
-      subgraphError = loaded.subgraphError;
-      requestsSource = loaded.requestsSource;
-    }
-    const dvm = omitRequests || !ethClient ? null : await getDvmTiming(ethClient);
     const rows = loadFilteredDisputes({
       source: req.query.source,
       topic: req.query.topic,
@@ -416,9 +406,23 @@ app.get<{
       chain: chainFilter,
       limit,
     });
-    const currentDvmRound = dvm?.roundId ?? null;
     const enrichCap = Math.min(Math.max(limit, 1), rows.length || 1);
-    const pmMap = await enrichDisputesForApi(rows, enrichCap);
+    /** Subgraph/RPC requests, DVM timing, and Polymarket enrichment are independent — run in parallel so TTFB is ~max(latency) not sum. */
+    const requestsP: Promise<{
+      requests: PriceRequestSummary[];
+      subgraphError?: string;
+      requestsSource?: "subgraph" | "rpc";
+    }> = omitRequests
+      ? Promise.resolve({ requests: [] })
+      : loadActivePriceRequests(graphKey, ethClient, 20);
+    const dvmP: Promise<DvmTiming | null> =
+      omitRequests || !ethClient ? Promise.resolve(null) : getDvmTiming(ethClient);
+    const pmP = enrichDisputesForApi(rows, enrichCap);
+    const [loaded, dvm, pmMap] = await Promise.all([requestsP, dvmP, pmP]);
+    const requests = loaded.requests;
+    const subgraphError = loaded.subgraphError;
+    const requestsSource = loaded.requestsSource;
+    const currentDvmRound = dvm?.roundId ?? null;
     const disputes = rows.map((r) => {
       const polymarket = pmMap.get(r.dispute_key) ?? null;
       return {
@@ -712,14 +716,14 @@ function petitionSignatureCounts(petitionId: string): { total: number; verified:
   return { total, verified };
 }
 
-function petitionWalletSignCore(
+async function petitionWalletSignCore(
   telegramId: string,
   petitionId: string,
   comment: string | null,
   walletAddress: `0x${string}`,
   walletMessage: string,
   walletSignature: Hex
-): { ok: true; signatureCount: number; verifiedSignatureCount: number } | { status: number; error: string } {
+): Promise<{ ok: true; signatureCount: number; verifiedSignatureCount: number } | { status: number; error: string }> {
   getOrCreateUser(db, telegramId, null);
   const row = db.prepare(`SELECT id, hidden, closed_at FROM petitions WHERE id = ?`).get(petitionId) as
     | { id: string; hidden: number; closed_at: string | null }
@@ -731,12 +735,15 @@ function petitionWalletSignCore(
   if (!linked || linked.address.toLowerCase() !== walletAddress.toLowerCase()) {
     return { status: 403, error: "Wallet not linked to this Telegram account" };
   }
-  const okSig = verifyMessage({
-    address: walletAddress,
-    message: walletMessage,
-    signature: walletSignature,
-  });
-  if (!okSig) return { status: 400, error: "Invalid wallet signature" };
+  let recovered: `0x${string}`;
+  try {
+    recovered = await recoverMessageAddress({ message: walletMessage, signature: walletSignature });
+  } catch {
+    return { status: 400, error: "Invalid wallet signature" };
+  }
+  if (recovered.toLowerCase() !== walletAddress.toLowerCase()) {
+    return { status: 400, error: "Signature does not match linked wallet" };
+  }
   db.prepare(
     `INSERT INTO petition_signatures (petition_id, signer_telegram_id, comment, signed_at, wallet_address, wallet_message, wallet_signature)
      VALUES (?, ?, ?, datetime('now'), ?, ?, ?)
@@ -805,22 +812,6 @@ function buildPetitionResponse(row: PetitionRow, viewerTelegramId: string | null
   };
 }
 
-app.get<{ Params: { id: string }; Querystring: { initData?: string } }>("/api/petitions/:id", async (req, reply) => {
-  const rawId = (req.params.id ?? "").trim().toLowerCase();
-  if (!rawId || rawId.length > 64 || !/^[a-f0-9]+$/.test(rawId)) {
-    return reply.status(400).send({ error: "Invalid petition id" });
-  }
-  const row = db.prepare(`SELECT * FROM petitions WHERE id = ?`).get(rawId) as PetitionRow | undefined;
-  if (!row) return reply.status(404).send({ error: "Not found" });
-  let viewerId: string | null = null;
-  const initData = typeof req.query.initData === "string" ? req.query.initData : undefined;
-  if (initData && botToken && verifyInitData(initData, botToken)) {
-    const u = parseUserFromInitData(initData);
-    if (u?.id) viewerId = String(u.id);
-  }
-  return buildPetitionResponse(row, viewerId);
-});
-
 app.get("/api/petitions/active", async () => {
   const rows = db
     .prepare(
@@ -848,6 +839,22 @@ app.get("/api/petitions/active", async () => {
       };
     }),
   };
+});
+
+app.get<{ Params: { id: string }; Querystring: { initData?: string } }>("/api/petitions/:id", async (req, reply) => {
+  const rawId = (req.params.id ?? "").trim().toLowerCase();
+  if (!rawId || rawId.length > 64 || !/^[a-f0-9]+$/.test(rawId)) {
+    return reply.status(400).send({ error: "Invalid petition id" });
+  }
+  const row = db.prepare(`SELECT * FROM petitions WHERE id = ?`).get(rawId) as PetitionRow | undefined;
+  if (!row) return reply.status(404).send({ error: "Not found" });
+  let viewerId: string | null = null;
+  const initData = typeof req.query.initData === "string" ? req.query.initData : undefined;
+  if (initData && botToken && verifyInitData(initData, botToken)) {
+    const u = parseUserFromInitData(initData);
+    if (u?.id) viewerId = String(u.id);
+  }
+  return buildPetitionResponse(row, viewerId);
 });
 
 app.post<{ Body: { initData?: string; petitionId?: string } }>("/api/me/petition/fetch", async (req, reply) => {
@@ -893,12 +900,13 @@ app.post<{
   if (!issuedAtFresh(issuedAt)) return reply.status(400).send({ error: "issuedAt expired or invalid" });
   const expected = buildWalletLinkMessage(v.userId, issuedAt);
   if (message !== expected) return reply.status(400).send({ error: "message mismatch" });
-  const recovered = await verifyMessage({
-    message,
-    signature,
-  }).catch(() => false);
-  if (!recovered) return reply.status(400).send({ error: "Invalid signature" });
-  const addr = normalizeLinkedEthAddress(String(recovered));
+  let recoveredRaw: string;
+  try {
+    recoveredRaw = await recoverMessageAddress({ message, signature });
+  } catch {
+    return reply.status(400).send({ error: "Invalid signature" });
+  }
+  const addr = normalizeLinkedEthAddress(recoveredRaw);
   if (!addr) return reply.status(400).send({ error: "Could not recover address" });
   getOrCreateUser(db, v.userId, null);
   const taken = db
@@ -970,14 +978,15 @@ app.post<{
   if (comment && comment.length > petitionMaxCommentChars) {
     return reply.status(400).send({ error: "comment too long" });
   }
-  const recovered = await verifyMessage({
-    message,
-    signature,
-  }).catch(() => false);
-  if (!recovered) return reply.status(400).send({ error: "Invalid signature" });
-  const walletAddress = normalizeLinkedEthAddress(String(recovered));
+  let recoveredRaw: string;
+  try {
+    recoveredRaw = await recoverMessageAddress({ message, signature });
+  } catch {
+    return reply.status(400).send({ error: "Invalid signature" });
+  }
+  const walletAddress = normalizeLinkedEthAddress(recoveredRaw);
   if (!walletAddress) return reply.status(400).send({ error: "Could not recover address" });
-  const out = petitionWalletSignCore(v.userId, petitionId, comment, walletAddress, message, signature);
+  const out = await petitionWalletSignCore(v.userId, petitionId, comment, walletAddress, message, signature);
   if ("error" in out) return reply.status(out.status).send({ error: out.error });
   return {
     ok: true,
@@ -1068,7 +1077,8 @@ app.post<{
   }
   const id = newPetitionId();
   db.prepare(
-    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at) VALUES (?, ?, ?, ?, 0, datetime('now'))`
+    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at, image_url, dispute_key, condition_id)
+     VALUES (?, ?, ?, ?, 0, datetime('now'), NULL, NULL, NULL)`
   ).run(id, telegramId, title, body);
   return { ok: true, id, legalNote: PETITION_LEGAL_NOTE };
 });
@@ -1078,17 +1088,10 @@ app.post<{
   Body: { telegramId?: string; petitionId?: string; comment?: string | null };
 }>("/api/internal/petition/sign", async (req, reply) => {
   if (!requireInternal(req, reply)) return;
-  const telegramId = (req.body?.telegramId ?? "").trim();
-  const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
-  let comment = (req.body?.comment ?? "").trim() || null;
-  if (!telegramId || !petitionId) return reply.status(400).send({ error: "telegramId and petitionId required" });
-  if (!/^[a-f0-9]+$/.test(petitionId)) return reply.status(400).send({ error: "Invalid petitionId" });
-  if (comment && comment.length > petitionMaxCommentChars) {
-    return reply.status(400).send({ error: "comment too long" });
-  }
-  const out = petitionSignCore(telegramId, petitionId, comment);
-  if ("error" in out) return reply.status(out.status).send({ error: out.error });
-  return { ok: true, signatureCount: out.signatureCount, legalNote: PETITION_LEGAL_NOTE };
+  return reply.status(410).send({
+    error:
+      "Petitions must be signed in the Telegram Mini App with the same Ethereum wallet linked to your account.",
+  });
 });
 
 app.post<{
@@ -1138,21 +1141,31 @@ app.get<{ Querystring: { secret?: string; petitionId?: string } }>("/api/cron/pe
   if (!row) return reply.status(404).send({ error: "Not found" });
   const rows = db
     .prepare(
-      `SELECT petition_id, signer_telegram_id, comment, signed_at FROM petition_signatures WHERE petition_id = ? ORDER BY signed_at ASC`
+      `SELECT petition_id, signer_telegram_id, comment, signed_at, wallet_address, wallet_signature
+       FROM petition_signatures WHERE petition_id = ? ORDER BY signed_at ASC`
     )
     .all(petitionId) as {
     petition_id: string;
     signer_telegram_id: string;
     comment: string | null;
     signed_at: string;
+    wallet_address: string | null;
+    wallet_signature: string | null;
   }[];
   const header = petitionExportIncludesUsername
-    ? "petition_id,signed_at,signer_telegram_id,comment\n"
-    : "petition_id,signed_at,signer_hash,comment\n";
+    ? "petition_id,signed_at,signer_telegram_id,comment,wallet_verified\n"
+    : "petition_id,signed_at,signer_hash,comment,wallet_verified\n";
   const lines = rows.map((r) => {
     const ref = signerExportRef(r.petition_id, r.signer_telegram_id);
     const c = csvEscapeCell((r.comment ?? "").replace(/\r?\n/g, " "));
-    return [csvEscapeCell(r.petition_id), csvEscapeCell(r.signed_at), csvEscapeCell(ref), c].join(",");
+    const verified =
+      r.wallet_address &&
+      r.wallet_address.trim() !== "" &&
+      r.wallet_signature &&
+      r.wallet_signature.trim() !== ""
+        ? "1"
+        : "0";
+    return [csvEscapeCell(r.petition_id), csvEscapeCell(r.signed_at), csvEscapeCell(ref), c, verified].join(",");
   });
   reply
     .header("content-type", "text/csv; charset=utf-8")

@@ -55,6 +55,9 @@ export default function Votes() {
     queryKey: ["votes", queryString],
     queryFn: () => apiGet<VotesPayload>(`/api/votes?${queryString}`),
     refetchInterval: 30_000,
+    /** Show last payload while refetching (tab revisit / poll) instead of a blank skeleton. */
+    placeholderData: (prev) => prev,
+    staleTime: 15_000,
   });
 
   const openVoter = (url?: string) => {
