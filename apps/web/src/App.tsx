@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Home as HomeIcon, ListTree, UserRound } from "lucide-react";
+import { ArrowLeftRight, Home as HomeIcon, ListTree, ScrollText, UserRound } from "lucide-react";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import HomePage from "./pages/Home";
@@ -10,6 +10,8 @@ import Votes from "./pages/Votes";
 import VoteDisputeDetail from "./pages/VoteDisputeDetail";
 import Account from "./pages/Account";
 import PetitionDetail from "./pages/PetitionDetail";
+import PetitionsHome from "./pages/PetitionsHome";
+import PetitionCreate from "./pages/PetitionCreate";
 import { apiPost, getInitData, getStartParam } from "./api";
 import { SessionProvider, type Session } from "./session";
 
@@ -63,6 +65,10 @@ function VoteStartRedirect() {
       }
       return;
     }
+    if (sp === "petitions") {
+      navigate("/petitions", { replace: true });
+      return;
+    }
     if (sp.startsWith("petition_")) {
       const pid = sp.slice(9).trim().toLowerCase();
       if (pid.length > 0 && pid.length <= 64 && /^[a-f0-9]+$/.test(pid)) {
@@ -88,7 +94,7 @@ export default function App() {
   const onLanding =
     path === "/welcome" || path === "/insure" || path === "/voter" || (path === "/" && !miniApp);
   const onVotesSection = path === "/votes" || path.startsWith("/votes/");
-  const onPetitionSection = path.startsWith("/petitions/");
+  const onPetitionSection = path === "/petitions" || path.startsWith("/petitions/");
   const onMobileWebShell =
     isMobileWebNav &&
     (path === "/" ||
@@ -137,6 +143,7 @@ export default function App() {
         { to: "/", label: "Home", end: true as const, icon: HomeIcon, matchHomeAliases: true as const },
         { to: "/swap", label: "Swap", end: false as const, icon: ArrowLeftRight },
         { to: "/votes", label: "Votes", end: false as const, icon: ListTree },
+        { to: "/petitions", label: "Petitions", end: false as const, icon: ScrollText },
         { to: "/account", label: "Account", end: false as const, icon: UserRound },
       ] as const,
     []
@@ -171,6 +178,8 @@ export default function App() {
           <Route path="/swap" element={<Swap />} />
           <Route path="/votes" element={<Votes />} />
           <Route path="/votes/dispute/:token" element={<VoteDisputeDetail />} />
+          <Route path="/petitions" element={<PetitionsHome />} />
+          <Route path="/petitions/new" element={<PetitionCreate />} />
           <Route path="/petitions/:id" element={<PetitionDetail />} />
           <Route path="/account" element={<Account />} />
           <Route path="*" element={<Navigate to="/" replace />} />

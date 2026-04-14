@@ -60,11 +60,6 @@ export default function Votes() {
     staleTime: 15_000,
   });
 
-  const openVoter = (url?: string) => {
-    const u = url ?? "https://vote.umaproject.org/";
-    window.Telegram?.WebApp?.openLink(u, { try_instant_view: false }) ?? window.open(u, "_blank");
-  };
-
   if (q.isPending) {
     return (
       <>
@@ -125,9 +120,9 @@ export default function Votes() {
           <p className="muted" style={{ margin: "6px 0 0", fontSize: 13 }}>
             Round ends (UTC): {new Date(dvm.roundEndsAt * 1000).toLocaleString()}
           </p>
-          <button type="button" className="btn btn-primary btn-press" style={{ marginTop: 10 }} onClick={() => openVoter()}>
-            Open official voter dApp
-          </button>
+          <p className="muted" style={{ margin: "10px 0 0", fontSize: 13 }}>
+            Open a dispute below to commit or reveal in this app.
+          </p>
         </div>
       ) : (
         <div className="card">
@@ -284,7 +279,7 @@ export default function Votes() {
       >
         <summary className="votes-filters-summary">Advanced: all active DVM price requests</summary>
         <p className="muted" style={{ marginTop: 4 }}>
-          Raw on-chain identifiers (same pool as vote.umaproject.org). For most users, <b>Open disputes</b> and search are
+          Raw on-chain identifiers for unresolved DVM price requests. For most users, <b>Open disputes</b> and search are
           enough.
         </p>
         {list.length === 0 ? (
@@ -327,9 +322,6 @@ export default function Votes() {
                     ancillary: {r.ancillaryData ?? "—"}
                   </pre>
                 ) : null}
-                <button type="button" className="btn btn-primary btn-press" style={{ marginTop: 8 }} onClick={() => openVoter()}>
-                  Open official voter dApp
-                </button>
               </div>
             );
           })

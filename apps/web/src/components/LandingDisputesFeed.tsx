@@ -88,10 +88,10 @@ export default function LandingDisputesFeed() {
         {FEED_TITLE}
       </h2>
       <p className="landing-feed-lead">
-        Polygon OO disputes headed to the DVM. <strong>Stake</strong> UMA on Ethereum VotingV2 for voting weight (use
-        the official voter dApp); <strong>commit / reveal</strong> here is a separate wallet step. Commits without stake
-        can be submitted but carry no weight until you are staked — timing of when new stake counts is determined by
-        VotingV2 (often the next round).
+        Polygon OO disputes headed to the DVM. <strong>Stake</strong> UMA on Ethereum VotingV2 for voting weight, then{" "}
+        <strong>commit / reveal</strong> from each dispute page in this app. Commits without stake can be submitted but
+        carry no weight until you are staked — timing of when new stake counts is determined by VotingV2 (often the next
+        round).
       </p>
 
       {disputes.length === 0 ? (
@@ -110,7 +110,6 @@ export default function LandingDisputesFeed() {
               `${d.source} · ${shortHex(d.identifier, 12, 8)}`;
             const focus = encodeVoteFocusToken(d.id);
             const voteHref = `/votes/dispute/${focus}`;
-            const stakeHref = d.voterDappUrl?.trim() || "https://vote.umaproject.org/";
 
             return (
               <li key={d.id} className="landing-dispute-row">
@@ -134,16 +133,8 @@ export default function LandingDisputesFeed() {
                 </div>
                 <div className="landing-dispute-row-actions">
                   <Link to={voteHref} className="landing-btn landing-btn--primary landing-btn--compact">
-                    Vote (web)
+                    Vote in app
                   </Link>
-                  <a
-                    className="landing-btn landing-btn--secondary landing-btn--compact"
-                    href={stakeHref}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Stake / official dApp
-                  </a>
                 </div>
               </li>
             );

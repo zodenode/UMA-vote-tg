@@ -1,6 +1,10 @@
 import { mainnet } from "wagmi/chains";
 import { useAccount, useConnect, useChainId, useSwitchChain } from "wagmi";
 
+const walletConnectConfigured = Boolean(
+  (import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined)?.trim()
+);
+
 export default function VotesWalletBar() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -12,15 +16,18 @@ export default function VotesWalletBar() {
     <div className="card">
       <h2>Wallet</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        Disputes usually appear on <b>Polygon</b> first. Your vote (commit / reveal) is signed on <b>Ethereum</b> — connect
-        a normal wallet here, or WalletConnect on mobile if the host set it up.
+        Disputes usually appear on <b>Polygon</b> first. Commit and reveal are signed on <b>Ethereum mainnet</b> — connect
+        your wallet below.
+        {!walletConnectConfigured ? (
+          <>
+            {" "}
+            <span className="muted">
+              (WalletConnect is not configured for this build; use an injected wallet such as MetaMask when the browser
+              supports it.)
+            </span>
+          </>
+        ) : null}
       </p>
-      <details className="votes-technical">
-        <summary className="votes-technical-summary">Host / dev: WalletConnect env</summary>
-        <p className="muted" style={{ marginTop: 8 }}>
-          Set <code>VITE_WALLETCONNECT_PROJECT_ID</code> for reliable WalletConnect inside Telegram.
-        </p>
-      </details>
       {!isConnected ? (
         <div style={{ marginTop: 8 }}>
           {connectors.map((c) => (

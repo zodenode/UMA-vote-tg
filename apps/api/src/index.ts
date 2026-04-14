@@ -16,7 +16,6 @@ import {
 } from "./disputePoll.js";
 import { MAINNET, POLYGON, UMA_POLYGON, WMATIC_POLYGON } from "./contracts.js";
 import { getDvmTiming, type DvmTiming } from "./dvmTiming.js";
-import { voterDappDeepLink } from "./disputeClassifier.js";
 import { parseVaultMasterKey, encryptPrivateKey, decryptPrivateKey } from "./vaultCrypto.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
@@ -1717,13 +1716,8 @@ app.get<{ Querystring: { secret?: string } }>("/api/cron/pending-dispute-alerts"
   const hrs = dvm ? dvm.hoursLeftInPhase.toFixed(1) : "?";
   const lines = pending.map((r, i) => {
     const src = r.source_label ?? "Other";
-    const url = voterDappDeepLink({
-      identifier: r.identifier as Hex,
-      timestamp: BigInt(r.timestamp),
-      ancillaryData: r.ancillary_data as Hex,
-    });
     const cid = r.chain_id ?? "1";
-    return `${i + 1}. <b>${src}</b> — voter dApp (context link):\n${url}\n   tx: ${txExplorerUrl(cid, r.tx_hash)}`;
+    return `${i + 1}. <b>${src}</b> — open <b>Votes</b> in the Mini App to commit/reveal.\n   tx: ${txExplorerUrl(cid, r.tx_hash)}`;
   });
   const head =
     dvm != null

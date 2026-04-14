@@ -65,10 +65,16 @@ export default function Account() {
   }
 
   function shareReminder() {
+    const mini =
+      botUser && botUser !== "YOUR_BOT"
+        ? `https://t.me/${botUser}?startapp=vote`
+        : "Open the uma.vote Mini App → Votes.";
     const text = [
-      "UMA DVM vote window — commit & reveal on https://vote.umaproject.org/",
+      "UMA DVM vote window — commit & reveal in the Mini App (Ethereum wallet).",
       "",
-      "Get UMA and see active rounds in the Telegram Mini App.",
+      mini,
+      "",
+      "Swap to UMA on Ethereum for voting weight when you are ready.",
     ].join("\n");
     navigator.clipboard.writeText(text).then(() => setMsg("Reminder text copied for your chat."));
   }
@@ -164,8 +170,9 @@ export default function Account() {
       <div className="card">
         <h2>Phase 2 (not in this MVP)</h2>
         <p className="muted">
-          In-app stake, commit, and reveal against UMA contracts needs audits and careful key handling. Until then,
-          use the official voter dApp after you hold UMA.
+          In-app <b>staking</b> UI (deposit UMA into VotingV2 from this app) is not in this MVP; commit and reveal are
+          already supported on each dispute page. Stake UMA on VotingV2 with the same address you vote from (any
+          Ethereum tool you trust), then return here to commit.
         </p>
       </div>
 

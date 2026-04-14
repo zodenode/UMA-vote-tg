@@ -5,8 +5,8 @@ export default function Home() {
     <>
       <h1>uma.vote</h1>
       <p className="muted">
-        Track <b>Polygon</b> disputes, buy <b>UMA</b> on <b>Ethereum</b> for voting weight, commit/reveal in this app,
-        or use the official voter dApp anytime.
+        Track <b>Polygon</b> disputes, buy <b>UMA</b> on <b>Ethereum</b> for voting weight, and commit/reveal on{" "}
+        <b>VotingV2</b> from this Mini App.
       </p>
       <div className="card">
         <span className="badge">MVP</span>
@@ -20,21 +20,6 @@ export default function Home() {
             Active votes
           </Link>
         </div>
-      </div>
-      <div className="card">
-        <h2>Official voter dApp</h2>
-        <p className="muted">All staking and voting happens on vote.umaproject.org (not affiliated).</p>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={() =>
-            window.Telegram?.WebApp?.openLink("https://vote.umaproject.org/", {
-              try_instant_view: false,
-            }) ?? window.open("https://vote.umaproject.org/", "_blank")
-          }
-        >
-          Open vote.umaproject.org
-        </button>
       </div>
       <p className="muted" style={{ marginTop: 16 }}>
         Docs:{" "}

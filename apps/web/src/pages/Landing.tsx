@@ -58,8 +58,8 @@ export default function Landing() {
             </span>
             <h2 className="landing-card-title">DVM voting</h2>
             <p className="landing-card-text">
-              Most live OO disputes surface on Polygon first; DVM commits still go to VotingV2 on Ethereum — or use the
-              official voter dApp anytime.
+              Most live OO disputes surface on Polygon first; DVM commits and reveals are signed on Ethereum VotingV2 from
+              this app.
             </p>
           </article>
           <article className="landing-card">
@@ -104,8 +104,8 @@ export default function Landing() {
               <div>
                 <strong>Commit → reveal</strong>
                 <p className="landing-step-desc">
-                  Salt stored locally for reveal. Stake on VotingV2 (official dApp) for weight — not bundled with commit
-                  here; commits without stake do not count until you are staked.
+                  Salt stored locally for reveal. Stake UMA on VotingV2 for voting weight (on-chain, same wallet); commits
+                  without stake do not count until you are staked.
                 </p>
               </div>
             </li>

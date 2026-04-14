@@ -67,7 +67,7 @@ function morePanelCaptionHtml(): string {
     "⚙️ <b>More</b>",
     "",
     "🔐 <b>Vault</b> — custodial wallet (deposit / withdraw native ETH·POL, commit/reveal).",
-    "🌐 <b>Official dApp</b> — button below.",
+    "🗳 <b>Vote</b> — open the Mini App from the button below.",
     "",
     "⌨️ <code>/help</code> — full command list",
   ].join("\n");
@@ -77,7 +77,7 @@ function mainMenuKeyboard(alertsOn: boolean) {
   const kb = new InlineKeyboard();
   if (webAppUrl) {
     kb.webApp("🔍 Search or paste link — Vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-    kb.webApp("📱 Mini App (home)", webAppUrl).row();
+    kb.webApp("📜 Petitions", webAppUrlWithStartParam(webAppUrl, "petitions")).webApp("📱 Mini App (home)", webAppUrl).row();
   }
   kb.text("📋 Indexed disputes", "vote_list").row();
   if (inlineShareEnabled) {
@@ -91,7 +91,9 @@ function mainMenuKeyboard(alertsOn: boolean) {
 function moreMenuKeyboard() {
   const kb = new InlineKeyboard();
   kb.text("🔐 Open vault", "vault_menu").row();
-  kb.url("🌐 Official voter dApp", "https://vote.umaproject.org/").row();
+  if (webAppUrl) {
+    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  }
   kb.text("« 🏠 Back to home", "menu_home").row();
   return kb;
 }
@@ -252,6 +254,8 @@ async function replyPetitionCard(ctx: Context, petitionId: string, opts?: { with
     title: string;
     body: string | null;
     signatureCount: number;
+    verifiedSignatureCount?: number;
+    imageUrl?: string | null;
     createdAt?: string;
     legalNote?: string;
   };
@@ -264,16 +268,15 @@ async function replyPetitionCard(ctx: Context, petitionId: string, opts?: { with
     `<b>${escapeHtml(p.title)}</b>`,
     p.body ? `\n${escapeHtml(p.body.slice(0, 3500))}${p.body.length > 3500 ? "…" : ""}` : "",
     "",
-    `✍️ <b>Signatures:</b> ${p.signatureCount}`,
+    `✍️ <b>Signatures:</b> ${p.signatureCount}${
+      typeof p.verifiedSignatureCount === "number" ? ` · <b>Wallet-verified:</b> ${p.verifiedSignatureCount}` : ""
+    }`,
     "",
     `<i>${escapeHtml(PETITION_DISCLAIMER_BOT)}</i>`,
   ].filter(Boolean);
   const kb = new InlineKeyboard();
-  if (p.body != null && !p.hidden) {
-    kb.text("✍️ Sign (Telegram)", `petition_sign:${p.id}`).row();
-  }
-  if (webAppUrl) {
-    kb.webApp("Open in Mini App", webAppUrlWithStartParam(webAppUrl, `petition_${p.id}`)).row();
+  if (p.body != null && !p.hidden && webAppUrl) {
+    kb.webApp("✍️ Sign in Mini App (wallet)", webAppUrlWithStartParam(webAppUrl, `petition_${p.id}`)).row();
   }
   if (shareUrl) {
     kb.url("Share t.me link", shareUrl).row();
@@ -284,7 +287,16 @@ async function replyPetitionCard(ctx: Context, petitionId: string, opts?: { with
   if (opts?.withHomeRow) {
     kb.text("« 🏠 Home", "menu_home").row();
   }
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+  const textBody = lines.join("\n");
+  const capLimit = 1024;
+  const caption =
+    textBody.length > capLimit ? `${textBody.slice(0, capLimit - 1)}…` : textBody;
+  const img = (p.imageUrl ?? "").trim();
+  if (img.startsWith("https://")) {
+    await ctx.replyWithPhoto(img, { caption, parse_mode: "HTML", reply_markup: kb });
+  } else {
+    await ctx.reply(textBody, { parse_mode: "HTML", reply_markup: kb });
+  }
 }
 
 async function internalJson(path: string, body: unknown) {
@@ -500,12 +512,10 @@ async function buildInlineVoteArticles(rawQuery: string): Promise<unknown[]> {
       "\n"
     );
     const rid = `d${i}-${token.slice(0, 24)}`.slice(0, 64);
-    const voterUrl = d.voterDappUrl?.trim() || "https://vote.umaproject.org/";
     const kb = new InlineKeyboard();
     if (webAppUrl) {
       kb.webApp("Open in Mini App", webAppUrlWithStartParam(webAppUrl, startapp)).row();
     }
-    kb.url("Official voter dApp", voterUrl);
     out.push({
       type: "article",
       id: rid,
@@ -668,6 +678,8 @@ bot.command("petition", async (ctx) => {
       "",
       `Send a <b>short title</b> (one message, max ~${120} chars).`,
       "",
+      "Tip: the Mini App <b>Petitions → New petition</b> flow adds a cover image and optional dispute / Polymarket link.",
+      "",
       `<i>${escapeHtml(PETITION_DISCLAIMER_BOT)}</i>`,
       "",
       "<code>/petition_cancel</code> to abort.",
@@ -687,7 +699,7 @@ bot.command("help", async (ctx) => {
       "🔍 Mini App → paste Polymarket URL / search (same as menu <b>Search or paste link</b>)",
       "📋 <code>/votes</code> — quick-open indexed disputes",
       "📎 <code>/invite</code> — your referral link + Mini App vote link",
-      "📜 <code>/petition</code> — create a community petition (DM wizard); <code>/petition_cancel</code>",
+      "📜 <code>/petition</code> — quick DM draft; Mini App <b>Petitions</b> for image + dispute link + wallet signatures",
       "🔐 <code>/wallet</code> — vault; <code>/wallet balances</code>; <code>/wallet withdraw eth|poly</code> then <code>0x… amountWei|MAX</code>; deposit = send to vault addr",
       "🧙 <code>/vote</code> · <code>/reveal</code> — vault commit / reveal wizard",
       "🔔 <code>/alerts_on</code> · <code>/alerts_off</code> — dispute pings + digest",
@@ -830,11 +842,9 @@ bot.command("pin_vote_alert", async (ctx) => {
     await ctx.reply("Only group admins can pin vote alerts.");
     return;
   }
-  const kb = new InlineKeyboard()
-    .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
-    .row();
+  const kb = new InlineKeyboard();
   if (webAppUrl) {
-    kb.webApp("🔍 Mini App — search & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
     kb.webApp("📱 Mini App home", webAppUrl).row();
   }
   const un = botUsername.replace(/^@/, "");
@@ -845,9 +855,9 @@ bot.command("pin_vote_alert", async (ctx) => {
   const msg = await ctx.reply(
     [
       "🗳 <b>UMA DVM vote window</b>",
-      "Commit / reveal on <b>vote.umaproject.org</b> (Ethereum).",
+      "Commit / reveal in the <b>Mini App</b> (Ethereum wallet or vault).",
       "",
-      "🔍 <b>Mini App:</b> open Search — paste a Polymarket link or pick an indexed dispute, then vote.",
+      "🔍 Open <b>Search / paste & vote</b> — Polymarket link, condition id, or pick an indexed dispute.",
       addBotLine,
     ]
       .filter(Boolean)
@@ -1414,18 +1424,19 @@ bot.callbackQuery(/^vr:(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^petition_sign:([a-f0-9]+)$/i, async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Recording signature…" });
-  const uid = String(ctx.from?.id ?? "");
+  await ctx.answerCallbackQuery({
+    text: "Signatures use the Mini App with a linked Ethereum wallet.",
+    show_alert: true,
+  });
   const pid = ctx.match![1]!.toLowerCase();
-  if (!uid || !(await ensureInternal(ctx))) return;
-  const r = await internalJson("/api/internal/petition/sign", { telegramId: uid, petitionId: pid, comment: null });
-  if (!r.ok) {
-    const t = await r.text();
-    await ctx.reply(`Could not sign: ${escapeHtml(t)}`, { parse_mode: "HTML" });
-    return;
-  }
-  const j = (await r.json()) as { signatureCount?: number };
-  await ctx.reply(`✅ Signed. Current signatures: <b>${j.signatureCount ?? "—"}</b>.`, { parse_mode: "HTML" });
+  if (!webAppUrl || !(await ensureInternal(ctx))) return;
+  await ctx.reply("Open the Mini App, link your wallet once, then sign this petition.", {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().webApp(
+      "Open Mini App",
+      webAppUrlWithStartParam(webAppUrl, `petition_${pid}`)
+    ),
+  });
 });
 
 bot.callbackQuery(/^petition_report:([a-f0-9]+)$/i, async (ctx) => {
@@ -1491,6 +1502,8 @@ bot.on("message:text", async (ctx, next) => {
           pid ? `\n<code>${escapeHtml(pid)}</code>` : "",
           "",
           link ? `Share: <a href="${escapeHtml(link)}">${escapeHtml(link)}</a>` : "Set PUBLIC_BOT_USERNAME for a stable share link.",
+          "",
+          "For a cover image + dispute link, create from the Mini App <b>Petitions → New petition</b> (this chat flow is text-only).",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -1591,11 +1604,9 @@ async function runDisputeBatchAlerts() {
   if (!sub.ok) return;
   const { telegramIds } = (await sub.json()) as { telegramIds: string[] };
   if (!telegramIds?.length) return;
-  const kb = new InlineKeyboard()
-    .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
-    .row();
+  const kb = new InlineKeyboard();
   if (webAppUrl) {
-    kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
     kb.webApp("📱 Mini App home", webAppUrl).row();
   }
   for (const id of telegramIds) {
@@ -1660,12 +1671,10 @@ async function runDigestOnce() {
   if (!data.telegramIds?.length) return;
   const lines = data.preview?.length
     ? data.preview.map((p) => `• ${p}`).join("\n")
-    : "• (see voter dApp)";
-  const kb = new InlineKeyboard()
-    .url("🌐 Official voter dApp", "https://vote.umaproject.org/")
-    .row();
+    : "• (open Votes in the Mini App)";
+  const kb = new InlineKeyboard();
   if (webAppUrl) {
-    kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
     kb.webApp("📱 Mini App home", webAppUrl).row();
   }
   for (const id of data.telegramIds) {

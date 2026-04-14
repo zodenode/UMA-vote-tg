@@ -213,7 +213,7 @@ export default function MarketDisputeFinder({ className = "", id }: { className?
           <p className="market-finder-followup-title">No matching dispute in our index yet</p>
           <p className="market-finder-followup-text">
             We only list active <strong>DisputePrice</strong> flows we have indexed. You can still open the market, get
-            UMA, and use the official voter dApp to stake when you are ready.
+            UMA, then return here once a dispute row appears — voting and staking context are on each dispute page.
           </p>
           <div className="market-finder-followup-row">
             <a className="landing-btn landing-btn--primary landing-btn--compact" href={noDisputeHit.url} target="_blank" rel="noreferrer">
@@ -222,14 +222,6 @@ export default function MarketDisputeFinder({ className = "", id }: { className?
             <Link to="/swap" className="landing-btn landing-btn--secondary landing-btn--compact">
               Swap to UMA
             </Link>
-            <a
-              className="landing-btn landing-btn--secondary landing-btn--compact"
-              href="https://vote.umaproject.org/"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Stake (official)
-            </a>
             <Link to="/votes" className="landing-btn landing-btn--ghost landing-btn--compact">
               All disputes
             </Link>

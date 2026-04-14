@@ -1,9 +1,20 @@
 const base = import.meta.env.VITE_API_URL?.replace(/\/$/, "") ?? "";
 
+function httpErrorMessage(status: number, text: string): string {
+  try {
+    const j = JSON.parse(text) as { error?: string };
+    if (typeof j.error === "string" && j.error.trim()) return j.error.trim();
+  } catch {
+    /* ignore */
+  }
+  return text.trim().slice(0, 800) || `HTTP ${status}`;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const r = await fetch(`${base}${path}`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<T>;
+  const text = await r.text();
+  if (!r.ok) throw new Error(httpErrorMessage(r.status, text));
+  return JSON.parse(text) as T;
 }
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
@@ -12,8 +23,9 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json() as Promise<T>;
+  const text = await r.text();
+  if (!r.ok) throw new Error(httpErrorMessage(r.status, text));
+  return JSON.parse(text) as T;
 }
 
 export function getInitData(): string {

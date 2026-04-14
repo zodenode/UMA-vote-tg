@@ -20,9 +20,8 @@ export default function VoteDisputeDetail() {
     refetchInterval: 30_000,
   });
 
-  const openVoter = (url?: string) => {
-    const u = url ?? "https://vote.umaproject.org/";
-    window.Telegram?.WebApp?.openLink(u, { try_instant_view: false }) ?? window.open(u, "_blank");
+  const openExternal = (url: string) => {
+    window.Telegram?.WebApp?.openLink(url, { try_instant_view: false }) ?? window.open(url, "_blank");
   };
 
   if (!safeToken) {
@@ -140,17 +139,17 @@ export default function VoteDisputeDetail() {
 
       <div className="card">
         <h2 style={{ marginTop: 0 }}>Vote on-chain</h2>
-        <p className="muted">Commit your vote during commit phase, then reveal when reveal opens. You can also use the official app.</p>
-        <button type="button" className="btn btn-primary btn-press" style={{ marginTop: 8 }} onClick={() => openVoter(d.voterDappUrl)}>
-          Open official voter dApp (with context)
-        </button>
+        <p className="muted">
+          Commit during the commit phase, then reveal when reveal opens. Voting uses your connected Ethereum wallet or
+          custodial vault below.
+        </p>
         <button
           type="button"
           className="btn btn-secondary btn-press"
           style={{ marginTop: 8 }}
-          onClick={() => openVoter(d.etherscanUrl)}
+          onClick={() => openExternal(d.etherscanUrl)}
         >
-          {d.chainId === 137 ? "Polygonscan" : "Etherscan"} (transaction)
+          {d.chainId === 137 ? "Polygonscan" : "Etherscan"} (dispute transaction)
         </button>
         {d.polymarket ? <PolymarketInfo pm={d.polymarket} reversalWatch={d.reversalWatch} /> : null}
         {d.polymarket && d.polymarket.outcomes?.length ? (

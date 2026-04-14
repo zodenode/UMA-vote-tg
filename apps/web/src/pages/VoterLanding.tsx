@@ -217,7 +217,7 @@ export default function VoterLanding() {
                 <h2 className="voter-h2">Designed for Flexibility</h2>
                 <p className="voter-body-lg">
                   Follow <b>Polygon</b> OO where the markets are, then sign <b>DVM</b> transactions on{" "}
-                  <b>Ethereum</b> — or use the official voter dApp anytime.
+                  <b>Ethereum</b> from this Mini App.
                 </p>
               </div>
 

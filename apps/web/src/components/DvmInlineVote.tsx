@@ -230,7 +230,7 @@ export default function DvmInlineVote(props: {
     }
     const p = loadPendingCommit(identifier, time, ancillaryData);
     if (!p) {
-      setVoteErr("No pending commit found in this browser. Use the voter dApp if you committed elsewhere.");
+      setVoteErr("No pending commit found in this browser. Reveal only works with the same wallet and browser that performed the commit.");
       return;
     }
     const price = BigInt(p.price);

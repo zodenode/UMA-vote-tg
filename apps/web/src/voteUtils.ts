@@ -1,5 +1,14 @@
 import type { Hex } from "viem";
 
+/** Same encoding as API `voteFocusToken` for `/votes/dispute/:token` links. */
+export function encodeVoteFocusToken(id: string): string {
+  const b = new TextEncoder().encode(id);
+  let bin = "";
+  for (let i = 0; i < b.length; i++) bin += String.fromCharCode(b[i]!);
+  const b64 = btoa(bin);
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 export function identifierToHex(id: string): Hex {
   const s = id.trim();
   if (s.startsWith("0x")) return s as Hex;
