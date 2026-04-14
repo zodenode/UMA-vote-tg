@@ -38,6 +38,7 @@ import {
   computePolymarketReversalWatch,
   type ReversalWatchResult,
 } from "./polymarketReversalSignal.js";
+import { fetchCommonsImageSuggestions } from "./petitionImageSuggestions.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
@@ -993,6 +994,28 @@ app.post<{
     verifiedSignatureCount: out.verifiedSignatureCount,
     legalNote: PETITION_LEGAL_NOTE,
   };
+});
+
+app.post<{
+  Body: { initData?: string; query?: string };
+}>("/api/me/petition/image-suggestions", async (req, reply) => {
+  const v = requireInitData(req.body?.initData);
+  if (!v.ok) return reply.status(v.status).send({ error: v.message });
+  getOrCreateUser(db, v.userId, null);
+  const raw = (req.body?.query ?? "").trim();
+  if (raw.length < 2) return { suggestions: [], attributionNote: null as string | null };
+  if (raw.length > 240) return reply.status(400).send({ error: "query too long" });
+  try {
+    const suggestions = await fetchCommonsImageSuggestions(raw, 12);
+    return {
+      suggestions,
+      attributionNote:
+        "Wikimedia Commons (open licenses vary). Open the file page from the image description before publishing if you need exact license terms.",
+    };
+  } catch (e) {
+    req.log.warn(e, "petition image suggestions");
+    return reply.status(502).send({ error: "Image search temporarily unavailable" });
+  }
 });
 
 app.post<{

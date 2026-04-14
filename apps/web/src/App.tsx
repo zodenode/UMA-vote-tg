@@ -111,6 +111,8 @@ export default function App() {
     (!miniApp && onMobileWebShell) ||
     (!miniApp && !isMobileWebNav && (path === "/swap" || onVotesSection || onPetitionSection || path === "/account"));
 
+  const desktopWebNav = Boolean(!miniApp && !isMobileWebNav && showTabBar);
+
   useEffect(() => {
     applyTelegramTheme();
     const onChange = () => applyTelegramTheme();
@@ -149,6 +151,39 @@ export default function App() {
     []
   );
 
+  const tabNav = (variant: "bottom" | "desktop-top") => (
+    <nav
+      className={[
+        "tabbar",
+        variant === "desktop-top" ? "tabbar--desktop-web" : "",
+        variant === "bottom" && miniApp ? "tabbar--miniapp" : "",
+        variant === "bottom" && !miniApp && isMobileWebNav ? "tabbar--mobile-web" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      aria-label="Main"
+    >
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        return (
+          <NavLink
+            key={t.to}
+            to={t.to}
+            end={t.end}
+            className={({ isActive }) => {
+              const active =
+                "matchHomeAliases" in t && t.matchHomeAliases ? isActive || path === "/welcome" : isActive;
+              return active ? "active" : "";
+            }}
+          >
+            <Icon className="tabbar-icon" aria-hidden strokeWidth={2} />
+            <span className="tabbar-text">{t.label}</span>
+          </NavLink>
+        );
+      })}
+    </nav>
+  );
+
   return (
     <SessionProvider session={session} setSession={setSession}>
       {sessionError ? (
@@ -161,57 +196,34 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      <div
-        className={[
-          onLanding ? "landing-wrap" : "app-shell",
-          showTabBar && onLanding ? "with-bottom-tabbar" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-      >
-        <VoteStartRedirect />
-        <Routes>
-          <Route path="/welcome" element={<Landing />} />
-          <Route path="/voter" element={<VoterLanding />} />
-          <Route path="/insure" element={<UmaInsureLanding />} />
-          <Route path="/" element={miniApp ? <HomePage /> : <Landing />} />
-          <Route path="/swap" element={<Swap />} />
-          <Route path="/votes" element={<Votes />} />
-          <Route path="/votes/dispute/:token" element={<VoteDisputeDetail />} />
-          <Route path="/petitions" element={<PetitionsHome />} />
-          <Route path="/petitions/new" element={<PetitionCreate />} />
-          <Route path="/petitions/:id" element={<PetitionDetail />} />
-          <Route path="/account" element={<Account />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </div>
-      {showTabBar ? (
-        <nav
-          className={["tabbar", miniApp ? "tabbar--miniapp" : isMobileWebNav ? "tabbar--mobile-web" : ""]
+      <div className={desktopWebNav ? "app-layout-desktop" : undefined}>
+        {desktopWebNav ? tabNav("desktop-top") : null}
+        <div
+          className={[
+            onLanding ? "landing-wrap" : "app-shell",
+            showTabBar && onLanding ? "with-bottom-tabbar" : "",
+          ]
             .filter(Boolean)
             .join(" ")}
-          aria-label="Main"
         >
-          {tabs.map((t) => {
-            const Icon = t.icon;
-            return (
-              <NavLink
-                key={t.to}
-                to={t.to}
-                end={t.end}
-                className={({ isActive }) => {
-                  const active =
-                    "matchHomeAliases" in t && t.matchHomeAliases ? isActive || path === "/welcome" : isActive;
-                  return active ? "active" : "";
-                }}
-              >
-                <Icon className="tabbar-icon" aria-hidden strokeWidth={2} />
-                <span className="tabbar-text">{t.label}</span>
-              </NavLink>
-            );
-          })}
-        </nav>
-      ) : null}
+          <VoteStartRedirect />
+          <Routes>
+            <Route path="/welcome" element={<Landing />} />
+            <Route path="/voter" element={<VoterLanding />} />
+            <Route path="/insure" element={<UmaInsureLanding />} />
+            <Route path="/" element={miniApp ? <HomePage /> : <Landing />} />
+            <Route path="/swap" element={<Swap />} />
+            <Route path="/votes" element={<Votes />} />
+            <Route path="/votes/dispute/:token" element={<VoteDisputeDetail />} />
+            <Route path="/petitions" element={<PetitionsHome />} />
+            <Route path="/petitions/new" element={<PetitionCreate />} />
+            <Route path="/petitions/:id" element={<PetitionDetail />} />
+            <Route path="/account" element={<Account />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </div>
+        {showTabBar && !desktopWebNav ? tabNav("bottom") : null}
+      </div>
     </SessionProvider>
   );
 }
