@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import DvmInlineVote from "../components/DvmInlineVote";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { apiGet } from "../api";
@@ -8,7 +8,14 @@ import VaultCustodialPanel from "../components/VaultCustodialPanel";
 import VotesWalletBar from "../components/VotesWalletBar";
 import { encodeVoteFocusToken } from "../voteFocusToken";
 import type { Dispute, VoteReq, VotesPayload } from "../voteTypes";
-import { disputeTitle, formatDuration, identifierToHex } from "../voteUtils";
+import {
+  decodeDvmIdentifierLabel,
+  disputeTitle,
+  formatDuration,
+  identifierToHex,
+  summarizeAncillaryData,
+  umaVoterDappUrl,
+} from "../voteUtils";
 
 export default function Votes() {
   const navigate = useNavigate();
@@ -35,6 +42,12 @@ export default function Votes() {
 
   /** Inline commit/reveal for a row from Active DVM votes (URLs cannot carry large ancillary payloads). */
   const [activeVoteReq, setActiveVoteReq] = useState<VoteReq | null>(null);
+  const activePanelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!activeVoteReq) return;
+    activePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [activeVoteReq?.id]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [source, setSource] = useState<string>("");
   /** Default all chains so Ethereum + Polygon disputes both show (Polygon-only filter hid mainnet rows). */
@@ -150,49 +163,80 @@ export default function Votes() {
           </p>
         </div>
       ) : (
-        list.map((r: VoteReq) => (
-          <div key={r.id} className="card votes-active-preview">
-            <div className="votes-active-preview-head">
-              <h3 className="votes-active-preview-title">{r.identifierId}</h3>
-              <span className="badge">Round {r.roundId ?? "—"}</span>
-            </div>
-            <p className="muted" style={{ margin: "8px 0 0", fontSize: 13 }}>
-              Requested: {new Date(Number(r.time) * 1000).toLocaleString()}
-              {r.participationPct != null ? ` · Participation ${r.participationPct}%` : ""}
-            </p>
-            <button
-              type="button"
-              className={
-                activeVoteReq?.id === r.id
-                  ? "btn btn-secondary btn-press votes-dispute-vote-cta"
-                  : "btn btn-primary btn-press votes-dispute-vote-cta"
-              }
-              style={{ marginTop: 12 }}
-              onClick={() => setActiveVoteReq((cur) => (cur?.id === r.id ? null : r))}
+        list.map((r: VoteReq) => {
+          const label = decodeDvmIdentifierLabel(r.identifierId);
+          const anc = summarizeAncillaryData(r.ancillaryData);
+          const voterUrl = umaVoterDappUrl(identifierToHex(r.identifierId), r.time, r.ancillaryData);
+          const open = activeVoteReq?.id === r.id;
+          return (
+            <div
+              key={r.id}
+              ref={open ? activePanelRef : undefined}
+              className="card votes-active-preview"
             >
-              {activeVoteReq?.id === r.id ? "Close" : "Vote in app"}
-            </button>
-          </div>
-        ))
+              <div className="votes-active-preview-head">
+                <h3 className="votes-active-preview-title">{label}</h3>
+                <span className="badge">Round {r.roundId ?? "—"}</span>
+              </div>
+              {label !== r.identifierId ? (
+                <p className="muted votes-dispute-preview-id" style={{ margin: "6px 0 0", fontSize: 12 }} title={r.identifierId}>
+                  {r.identifierId}
+                </p>
+              ) : null}
+              {anc.line ? (
+                <p className="muted" style={{ margin: "8px 0 0", fontSize: 13 }}>
+                  {anc.line}
+                </p>
+              ) : null}
+              {anc.outcomes?.length ? (
+                <p className="muted" style={{ margin: "6px 0 0", fontSize: 13 }}>
+                  <b>Outcomes:</b>{" "}
+                  {anc.outcomes.map((o, i) => (
+                    <span key={`${o}-${i}`}>
+                      {i > 0 ? " · " : null}
+                      <code style={{ fontSize: 12 }}>{o}</code>
+                    </span>
+                  ))}
+                </p>
+              ) : null}
+              <p className="muted" style={{ margin: "8px 0 0", fontSize: 13 }}>
+                Requested: {new Date(Number(r.time) * 1000).toLocaleString()}
+                {r.participationPct != null ? ` · Participation ${r.participationPct}%` : ""}
+              </p>
+              <p style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                <button
+                  type="button"
+                  className={
+                    open ? "btn btn-secondary btn-press votes-dispute-vote-cta" : "btn btn-primary btn-press votes-dispute-vote-cta"
+                  }
+                  aria-expanded={open}
+                  onClick={() => setActiveVoteReq((cur) => (cur?.id === r.id ? null : r))}
+                >
+                  {open ? "Close" : "Vote in app"}
+                </button>
+                <a className="btn btn-secondary btn-press votes-dispute-vote-cta" href={voterUrl} target="_blank" rel="noreferrer">
+                  Open official voter
+                </a>
+              </p>
+              {open ? (
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+                  <DvmInlineVote
+                    identifier={identifierToHex(r.identifierId)}
+                    time={r.time}
+                    ancillaryData={r.ancillaryData ?? "0x"}
+                    proposedPrice={null}
+                    dvm={dvm}
+                    vaultDisputeKey={null}
+                    vaultSigningEnabled={Boolean(data.vaultEnabled)}
+                    embedWallet
+                    officialVoterUrl={voterUrl}
+                  />
+                </div>
+              ) : null}
+            </div>
+          );
+        })
       )}
-
-      {activeVoteReq ? (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3 style={{ marginTop: 0 }}>Commit / reveal</h3>
-          <p className="muted" style={{ fontSize: 13 }}>
-            {activeVoteReq.identifierId} · requested {new Date(Number(activeVoteReq.time) * 1000).toLocaleString()}
-          </p>
-          <DvmInlineVote
-            identifier={identifierToHex(activeVoteReq.identifierId)}
-            time={activeVoteReq.time}
-            ancillaryData={activeVoteReq.ancillaryData ?? "0x"}
-            proposedPrice={null}
-            dvm={dvm}
-            vaultDisputeKey={null}
-            vaultSigningEnabled={Boolean(data.vaultEnabled)}
-          />
-        </div>
-      ) : null}
 
       <h2 style={{ marginTop: 28 }}>Open disputes</h2>
       <p className="muted" style={{ marginTop: 4 }}>

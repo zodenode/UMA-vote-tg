@@ -7,7 +7,7 @@ import PolymarketOddsCharts from "../components/PolymarketOddsCharts";
 import VaultCustodialPanel from "../components/VaultCustodialPanel";
 import VotesWalletBar from "../components/VotesWalletBar";
 import type { DisputeDetailPayload } from "../voteTypes";
-import { formatDuration, identifierToHex } from "../voteUtils";
+import { formatDuration, identifierToHex, umaVoterDappUrl } from "../voteUtils";
 
 export default function VoteDisputeDetail() {
   const { token } = useParams<{ token: string }>();
@@ -163,6 +163,8 @@ export default function VoteDisputeDetail() {
           dvm={dvm}
           vaultDisputeKey={d.id}
           vaultSigningEnabled={Boolean(q.data.vaultEnabled)}
+          embedWallet
+          officialVoterUrl={umaVoterDappUrl(identifierToHex(d.identifier), d.timestamp, d.ancillaryData)}
         />
       </div>
     </>

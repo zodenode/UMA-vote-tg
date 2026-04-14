@@ -3,6 +3,7 @@ import type { Address, Hex } from "viem";
 import { mainnet } from "wagmi/chains";
 import {
   useAccount,
+  useBalance,
   useChainId,
   useConnect,
   usePublicClient,
@@ -23,6 +24,11 @@ import {
   type PendingVoteCommit,
 } from "../umaVoting";
 import { apiPost, getInitData } from "../api";
+import { umaVoterDappUrl } from "../voteUtils";
+
+const UMA_ERC20_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
+/** ~0.00012 ETH at ~30 gwei × 400k gas — warn below this that commit/reveal may fail */
+const LOW_ETH_WARN_WEI = 120_000_000_000_000_000n;
 
 type DvmTiming = {
   phase: "commit" | "reveal";
@@ -57,6 +63,8 @@ export default function DvmInlineVote(props: {
   dvm: DvmTiming | null;
   /** When false, parent page should render a shared wallet connect bar. */
   embedWallet?: boolean;
+  /** Pre-built official voter link (same tab context as list row). */
+  officialVoterUrl?: string;
   /** Dispute key in API index — required for custodial commit/reveal. */
   vaultDisputeKey?: string | null;
   /** API has VAULT_MASTER_KEY + ETH_RPC_URL. */
@@ -69,13 +77,16 @@ export default function DvmInlineVote(props: {
     proposedPrice,
     dvm,
     embedWallet = false,
+    officialVoterUrl: officialVoterUrlProp,
     vaultDisputeKey = null,
     vaultSigningEnabled = false,
   } = props;
+  const officialVoterUrl = officialVoterUrlProp ?? umaVoterDappUrl(identifier, time, ancRaw);
   const ancillaryData = ancillaryToHex(ancRaw);
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { connect, connectors, isPending: connecting } = useConnect();
+  const noWalletConnectors = connectors.length === 0;
   const { switchChain, isPending: switching } = useSwitchChain();
   const publicClient = usePublicClient({ chainId: mainnet.id });
 
@@ -135,6 +146,19 @@ export default function DvmInlineVote(props: {
   });
 
   const stakeWei = stakeData?.[0];
+
+  const { data: ethBal } = useBalance({
+    address,
+    chainId: mainnet.id,
+    query: { enabled: Boolean(!useVault && address && isConnected) },
+  });
+  const { data: umaWalletBal } = useBalance({
+    address,
+    token: UMA_ERC20_MAINNET,
+    chainId: mainnet.id,
+    query: { enabled: Boolean(!useVault && address && isConnected) },
+  });
+  const lowEthForGas = ethBal != null && ethBal.value < LOW_ETH_WARN_WEI;
 
   const commitWithPrice = async (price: bigint) => {
     if (!address || !publicClient) {
@@ -347,6 +371,41 @@ export default function DvmInlineVote(props: {
         <code>VotingV2</code> on Ethereum. You pay gas. If you clear site data, you lose the salt for reveal unless you
         use the official dApp.
       </p>
+      {dvm?.phase === "reveal" ? (
+        <p
+          className="muted"
+          style={{
+            margin: "10px 0 0",
+            fontSize: 13,
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: "1px solid rgba(200, 160, 80, 0.35)",
+            background: "rgba(200, 160, 80, 0.08)",
+          }}
+        >
+          <b>Reveal phase</b> — new commits are closed until the next commit window. Use <b>Reveal vote</b> below only if
+          you already committed with <b>this same wallet</b> in <b>this browser</b>. Otherwise use{" "}
+          <a href={officialVoterUrl} target="_blank" rel="noreferrer">
+            the official voter
+          </a>
+          .
+        </p>
+      ) : (
+        <p
+          className="muted"
+          style={{
+            margin: "10px 0 0",
+            fontSize: 13,
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: "1px solid rgba(80, 160, 120, 0.25)",
+            background: "rgba(80, 160, 120, 0.06)",
+          }}
+        >
+          <b>Commit phase</b> — enter an int256 price (often <code>0</code> or <code>1000000000000000000</code> for binary
+          markets), then <b>Commit vote</b> and confirm in your wallet.
+        </p>
+      )}
       {statusLabel ? (
         <p className="muted" style={{ margin: "8px 0 0", fontSize: 12 }}>
           Request status: <b>{statusLabel}</b>
@@ -467,18 +526,30 @@ export default function DvmInlineVote(props: {
               <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
                 Connect an Ethereum mainnet wallet (DVM chain) to commit or reveal.
               </p>
-              {connectors.map((c) => (
-                <button
-                  key={c.uid}
-                  type="button"
-                  className="btn btn-secondary"
-                  style={{ marginRight: 8, marginTop: 6 }}
-                  disabled={connecting}
-                  onClick={() => connect({ connector: c, chainId: mainnet.id })}
-                >
-                  {connecting ? "Connecting…" : c.name}
-                </button>
-              ))}
+              {noWalletConnectors ? (
+                <p style={{ color: "var(--danger)", fontSize: 13, marginTop: 8, lineHeight: 1.45 }}>
+                  <b>No in-app wallet is available</b> (common inside Telegram when WalletConnect is not configured).
+                  Set <code>VITE_WALLETCONNECT_PROJECT_ID</code> on the web build, use a wallet-capable browser, or continue
+                  in{" "}
+                  <a href={officialVoterUrl} target="_blank" rel="noreferrer">
+                    the official voter
+                  </a>
+                  .
+                </p>
+              ) : (
+                connectors.map((c) => (
+                  <button
+                    key={c.uid}
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ marginRight: 8, marginTop: 6 }}
+                    disabled={connecting}
+                    onClick={() => connect({ connector: c, chainId: mainnet.id })}
+                  >
+                    {connecting ? "Connecting…" : c.name}
+                  </button>
+                ))
+              )}
             </>
           ) : (
             <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
@@ -500,6 +571,17 @@ export default function DvmInlineVote(props: {
         </div>
       ) : !useVault ? (
         <>
+          {lowEthForGas ? (
+            <p className="muted" style={{ color: "var(--danger)", fontSize: 12, marginTop: 8, lineHeight: 1.45 }}>
+              <b>Very low ETH on Ethereum</b> (~{ethBal?.formatted ?? "?"} {ethBal?.symbol}) — you may not be able to pay
+              gas for commit/reveal. Top up this wallet on mainnet first.
+            </p>
+          ) : ethBal ? (
+            <p className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+              ETH for gas (mainnet): ~{Number(ethBal.formatted).toFixed(4)} {ethBal.symbol}
+              {umaWalletBal ? ` · UMA in wallet: ~${Number(umaWalletBal.formatted).toFixed(2)} (staking is separate)` : null}
+            </p>
+          ) : null}
           {stakeWei !== undefined && stakeWei === 0n ? (
             <p className="muted" style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>
               No UMA staked on this voter address — commits may succeed but carry no voting weight until you stake on
@@ -511,6 +593,13 @@ export default function DvmInlineVote(props: {
               type="button"
               className="btn btn-primary"
               disabled={writing || confirming || dvm?.phase !== "commit"}
+              title={
+                dvm?.phase !== "commit"
+                  ? "Commits only during the DVM commit phase."
+                  : lowEthForGas
+                    ? "Low ETH — transaction may fail in the wallet; top up mainnet gas."
+                    : undefined
+              }
               onClick={() => void onCommit()}
             >
               {writing || confirming ? "Confirm in wallet…" : "Commit vote"}
@@ -519,6 +608,13 @@ export default function DvmInlineVote(props: {
               type="button"
               className="btn btn-primary"
               disabled={writing || confirming || dvm?.phase !== "reveal" || !pending}
+              title={
+                dvm?.phase !== "reveal"
+                  ? "Reveal only during the reveal phase and after a commit from this browser."
+                  : !pending
+                    ? "No commit stored in this browser for this request."
+                    : undefined
+              }
               onClick={() => void onReveal()}
             >
               {writing || confirming ? "Confirm in wallet…" : "Reveal vote"}
