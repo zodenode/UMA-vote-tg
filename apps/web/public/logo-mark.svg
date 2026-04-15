@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="uma.vote">
+  <defs>
+    <linearGradient id="umaMarkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="55%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="#0c0f14"/>
+  <rect x="56" y="56" width="400" height="400" rx="96" stroke="url(#umaMarkGrad)" stroke-width="20" fill="none" opacity="0.95"/>
+  <path
+    d="M148 262 216 334 364 178"
+    fill="none"
+    stroke="url(#umaMarkGrad)"
+    stroke-width="44"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

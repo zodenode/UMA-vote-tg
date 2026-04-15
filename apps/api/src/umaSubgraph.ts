@@ -40,6 +40,8 @@ export type PriceRequestSummary = {
   ancillaryData: string | null;
   roundId: string | null;
   participationPct: string | null;
+  /** Polymarket Gamma `question` when ancillary carries a known condition id (API may attach). */
+  polymarketTitle?: string | null;
 };
 
 export async function fetchActivePriceRequests(

@@ -68,7 +68,7 @@ export default function VoterLanding() {
       <main className="landing-main landing-main--voter">
         <section className="voter-hero">
           <div className="voter-hero-grid">
-            <div className="voter-hero-copy order-2 text-center lg:order-1 lg:text-left">
+            <div className="voter-hero-copy order-2 lg:order-1">
               <div className="voter-eyebrow-row">
                 <span className="voter-chip voter-chip--accent">
                   <Hexagon className="h-4 w-4" style={{ opacity: 0.9 }} />
@@ -85,7 +85,7 @@ export default function VoterLanding() {
                 <span className="voter-title-accent">Right in your pocket.</span>
               </h1>
 
-              <p className="voter-lead mx-auto lg:mx-0">
+              <p className="voter-lead">
                 Track <b>Polygon</b> prediction-market disputes as they happen, get swap quotes, then{" "}
                 <b>commit and reveal</b> on <b>Ethereum mainnet</b> where <code>VotingV2</code> lives — without leaving
                 Telegram.

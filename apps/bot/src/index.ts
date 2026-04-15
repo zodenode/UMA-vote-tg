@@ -7,7 +7,19 @@ if (!token) {
   process.exit(1);
 }
 
-const webAppUrl = process.env.WEB_APP_URL ?? "";
+const webAppBaseRaw = (process.env.WEB_APP_URL ?? "").trim().replace(/\/$/, "");
+/** Telegram only accepts https:// for inline Web App buttons; http or bad URLs make the whole /start fail. */
+function readHttpsMiniAppUrl(raw: string): string {
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" || !u.hostname) return "";
+    return raw;
+  } catch {
+    return "";
+  }
+}
+const webAppBase = readHttpsMiniAppUrl(webAppBaseRaw);
 const apiUrl = (process.env.API_PUBLIC_URL ?? "http://localhost:8787").replace(/\/$/, "");
 const cronSecret = process.env.CRON_SECRET ?? "";
 const internalSecret = process.env.INTERNAL_API_SECRET ?? "";
@@ -17,6 +29,9 @@ const inlineShareEnabled = /^1|true|yes$/i.test(process.env.BOT_INLINE_SHARE?.tr
 /** Optional HTTPS URL or Telegram file_id for / start welcome image (caption uses HTML). */
 const welcomePhotoUrl = process.env.WELCOME_PHOTO_URL?.trim();
 const welcomePhotoFileId = process.env.WELCOME_PHOTO_FILE_ID?.trim();
+/** Optional diagram for “How it works” (same rules as welcome photo: HTTPS URL or Telegram file_id). */
+const howItWorksPhotoUrl = process.env.HOW_IT_WORKS_PHOTO_URL?.trim();
+const howItWorksPhotoFileId = process.env.HOW_IT_WORKS_PHOTO_FILE_ID?.trim();
 
 const bot = new Bot(token);
 
@@ -44,22 +59,27 @@ async function clearWebhookForPolling() {
 }
 
 /** Pass-through start param for Mini App (Telegram passes as start_param / tgWebAppStartParam when supported). */
-function webAppUrlWithStartParam(base: string, startapp: string): string {
-  const b = base.replace(/\/$/, "");
+function miniAppStartUrl(base: string, startapp: string): string {
+  const b = base.trim().replace(/\/$/, "");
   const join = b.includes("?") ? "&" : "?";
   return `${b}${join}startapp=${encodeURIComponent(startapp)}`;
 }
 
 function welcomeCaptionHtml(): string {
-  return [
+  const lines = [
     "🗳 <b>uma.vote</b>",
     "",
-    "👉 Tap <b>Search or paste link — Vote</b> — Polymarket URL, condition id, or type a name. Vote in the Mini App.",
+    webAppBase
+      ? "👉 Tap <b>Search or paste link — Vote</b> — Polymarket URL, condition id, or type a name. Vote in the Mini App."
+      : "⚠️ <b>Mini App URL not set or not https://</b> — set <code>WEB_APP_URL</code> on the bot to a live <code>https://</code> Mini App. Use <b>Indexed disputes</b> / <b>More</b> below meanwhile.",
     "",
-    "💎 Need <b>UMA</b> first? Open <b>Mini App home</b> → Swap.",
+    webAppBase
+      ? "💎 Need <b>UMA</b> first? Open <b>Mini App home</b> → Swap."
+      : "💎 Open the Mini App from BotFather’s menu button when your host is on https.",
     "",
     "<i>Not affiliated with the UMA Foundation — docs.uma.xyz</i>",
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }
 
 function morePanelCaptionHtml(): string {
@@ -69,21 +89,79 @@ function morePanelCaptionHtml(): string {
     "🔐 <b>Vault</b> — custodial wallet (deposit / withdraw native ETH·POL, commit/reveal).",
     "🗳 <b>Vote</b> — open the Mini App from the button below.",
     "",
+    "📖 <b>How it works</b> — tap the guide button for a walkthrough (image if configured on the server).",
+    "",
     "⌨️ <code>/help</code> — full command list",
   ].join("\n");
 }
 
+function howItWorksCaptionHtml(): string {
+  return [
+    "📖 <b>How uma.vote works</b>",
+    "",
+    "<b>1.</b> Tap <b>Search or paste link — Vote</b> — the Mini App opens.",
+    "<b>2.</b> Paste a <b>Polymarket</b> link, paste an Oracle request id, or search by name. We show indexed <b>Polygon</b> / <b>Ethereum</b> disputes when we have them.",
+    "<b>3.</b> Read the card: Oracle vs market context, <b>DVM phase</b> countdown, and charts when linked.",
+    "<b>4.</b> <b>Vote on Ethereum:</b> connect a wallet in the Mini App to commit / reveal on <code>VotingV2</code> (self-custody, same family as the official voter dApp). Optional <b>vault</b> under <b>More</b> only if you turned it on.",
+    "<b>5.</b> Need <b>UMA</b> for voting weight? Use Mini App <b>Swap</b> on Ethereum.",
+    "",
+    "<b>Petitions</b> are community expression — not legal claims; each card has a disclaimer.",
+    "",
+    "<i>docs.uma.xyz · not affiliated with the UMA Foundation</i>",
+  ].join("\n");
+}
+
+function howItWorksAfterKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (webAppBase) {
+    kb.webApp("🔍 Open Mini App — Search / vote", miniAppStartUrl(webAppBase, "vote")).row();
+  }
+  kb.text("« 🏠 Home", "menu_home").row();
+  return kb;
+}
+
+async function replyHowItWorks(ctx: Context) {
+  const cap = howItWorksCaptionHtml();
+  const photo = howItWorksPhotoUrl || howItWorksPhotoFileId;
+  const kb = howItWorksAfterKeyboard();
+  await sendChatAction(ctx, photo ? "upload_photo" : "typing");
+  try {
+    if (photo) {
+      await ctx.replyWithPhoto(photo, { caption: cap, parse_mode: "HTML", reply_markup: kb });
+    } else {
+      await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
+    }
+  } catch (e) {
+    console.error("replyHowItWorks failed:", e);
+    try {
+      await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
+    } catch (e2) {
+      console.error("replyHowItWorks text fallback failed:", e2);
+    }
+  }
+}
+
+/** Text-only rows so /start can recover if another part of the full menu is rejected by Telegram. */
+function emergencyMenuKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("📋 Indexed disputes", "vote_list")
+    .row()
+    .text("⚙️ More", "menu_more")
+    .row();
+}
+
 function mainMenuKeyboard(alertsOn: boolean) {
   const kb = new InlineKeyboard();
-  if (webAppUrl) {
-    kb.webApp("🔍 Search or paste link — Vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-    kb.webApp("📜 Petitions", webAppUrlWithStartParam(webAppUrl, "petitions")).webApp("📱 Mini App (home)", webAppUrl).row();
+  if (webAppBase) {
+    kb.webApp("🔍 Search or paste link — Vote", miniAppStartUrl(webAppBase, "vote")).row();
+    kb.webApp("📜 Petitions", miniAppStartUrl(webAppBase, "petitions")).webApp("📱 Mini App (home)", webAppBase).row();
   }
   kb.text("📋 Indexed disputes", "vote_list").row();
   if (inlineShareEnabled) {
     kb.switchInline("📣 Share dispute search…", "vote ").row();
   }
   kb.text(alertsOn ? "🔔 Alerts ON" : "🔔 Alerts off", "alerts_on").text(alertsOn ? "🔕 Turn off" : "🔕 Turn on", "alerts_off").row();
+  kb.text("📖 How it works", "how_it_works").row();
   kb.text("⚙️ More · vault & links", "menu_more").row();
   return kb;
 }
@@ -91,9 +169,10 @@ function mainMenuKeyboard(alertsOn: boolean) {
 function moreMenuKeyboard() {
   const kb = new InlineKeyboard();
   kb.text("🔐 Open vault", "vault_menu").row();
-  if (webAppUrl) {
-    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  if (webAppBase) {
+    kb.webApp("🗳 Vote in Mini App", miniAppStartUrl(webAppBase, "vote")).row();
   }
+  kb.text("📖 How it works (guide)", "how_it_works").row();
   kb.text("« 🏠 Back to home", "menu_home").row();
   return kb;
 }
@@ -110,7 +189,8 @@ function isMainMenuMessage(msg: unknown): boolean {
       b.callback_data === "menu_more" ||
       b.callback_data === "alerts_on" ||
       b.callback_data === "alerts_off" ||
-      b.callback_data === "help"
+      b.callback_data === "help" ||
+      b.callback_data === "how_it_works"
   );
 }
 
@@ -164,7 +244,7 @@ function escapeHtml(s: string): string {
 type DisputeRow = { id: string; source: string; chainId: number };
 
 async function replyVotePicker(ctx: Context) {
-  if (!webAppUrl) {
+  if (!webAppBase) {
     await ctx.reply("Mini App URL is not configured (set WEB_APP_URL on the bot).");
     return;
   }
@@ -197,9 +277,9 @@ async function replyVotePicker(ctx: Context) {
     if (startapp.length > 512) continue;
     const chain = d.chainId === 137 ? "💜 Poly" : "⛓ ETH";
     const label = `🗳 ${i + 1}. ${d.source} · ${chain}`.slice(0, 64);
-    kb.webApp(label, webAppUrlWithStartParam(webAppUrl, startapp)).row();
+    kb.webApp(label, miniAppStartUrl(webAppBase, startapp)).row();
   }
-  kb.webApp("🔍 Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote")).row();
+  kb.webApp("🔍 Search / paste & vote", miniAppStartUrl(webAppBase, "vote")).row();
   if (inlineShareEnabled) {
     kb.switchInline("📣 Share in any chat…", "vote ").row();
   }
@@ -275,8 +355,8 @@ async function replyPetitionCard(ctx: Context, petitionId: string, opts?: { with
     `<i>${escapeHtml(PETITION_DISCLAIMER_BOT)}</i>`,
   ].filter(Boolean);
   const kb = new InlineKeyboard();
-  if (p.body != null && !p.hidden && webAppUrl) {
-    kb.webApp("✍️ Sign in Mini App (wallet)", webAppUrlWithStartParam(webAppUrl, `petition_${p.id}`)).row();
+  if (p.body != null && !p.hidden && webAppBase) {
+    kb.webApp("✍️ Sign in Mini App (wallet)", miniAppStartUrl(webAppBase, `petition_${p.id}`)).row();
   }
   if (shareUrl) {
     kb.url("Share t.me link", shareUrl).row();
@@ -468,7 +548,7 @@ async function buildInlineVoteArticles(rawQuery: string): Promise<unknown[]> {
     rows = rows.filter((d) => matchesInlineQuery(d, q));
   }
   const out: unknown[] = [];
-  if (webAppUrl) {
+  if (webAppBase) {
     out.push({
       type: "article",
       id: "uma-vote-home",
@@ -485,9 +565,9 @@ async function buildInlineVoteArticles(rawQuery: string): Promise<unknown[]> {
         parse_mode: "HTML",
       },
       reply_markup: new InlineKeyboard()
-        .webApp("Search / paste & vote", webAppUrlWithStartParam(webAppUrl, "vote"))
+        .webApp("Search / paste & vote", miniAppStartUrl(webAppBase, "vote"))
         .row()
-        .webApp("Mini App home", webAppUrl),
+        .webApp("Mini App home", webAppBase),
     });
   } else {
     out.push({
@@ -513,8 +593,8 @@ async function buildInlineVoteArticles(rawQuery: string): Promise<unknown[]> {
     );
     const rid = `d${i}-${token.slice(0, 24)}`.slice(0, 64);
     const kb = new InlineKeyboard();
-    if (webAppUrl) {
-      kb.webApp("Open in Mini App", webAppUrlWithStartParam(webAppUrl, startapp)).row();
+    if (webAppBase) {
+      kb.webApp("Open in Mini App", miniAppStartUrl(webAppBase, startapp)).row();
     }
     out.push({
       type: "article",
@@ -595,19 +675,37 @@ bot.command("start", async (ctx) => {
     const cap = welcomeCaptionHtml();
     const photo = welcomePhotoUrl || welcomePhotoFileId;
     if (photo) {
-      await sendChatAction(ctx, "upload_photo");
-      await ctx.replyWithPhoto(photo, { caption: cap, parse_mode: "HTML", reply_markup: kb });
+      try {
+        await sendChatAction(ctx, "upload_photo");
+        await ctx.replyWithPhoto(photo, { caption: cap, parse_mode: "HTML", reply_markup: kb });
+      } catch (photoErr) {
+        console.warn("/start: welcome photo failed, sending text menu only:", photoErr);
+        await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
+      }
     } else {
       await ctx.reply(cap, { parse_mode: "HTML", reply_markup: kb });
     }
   } catch (e) {
     console.error("/start handler failed:", e);
     try {
+      const kb = emergencyMenuKeyboard();
       await ctx.reply(
-        "Could not show the welcome menu (see bot logs). Common fixes: redeploy the bot worker, clear any Telegram webhook, and set BOT_INLINE_SHARE=1 only if Inline mode is enabled in @BotFather."
+        [
+          "<b>Welcome screen failed.</b> Operators: set <code>WEB_APP_URL</code> to a real <code>https://</code> Mini App URL (Telegram rejects <code>http://</code> for menu Web App buttons).",
+          "",
+          "Also check <code>WELCOME_PHOTO_URL</code> returns a real image, and bot logs for the exact API error.",
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: kb }
       );
     } catch (replyErr) {
-      console.error("/start fallback reply also failed:", replyErr);
+      console.error("/start fallback reply failed:", replyErr);
+      try {
+        await ctx.reply(
+          "uma.vote: /start failed. Set WEB_APP_URL to https://… on the bot host and check Railway logs."
+        );
+      } catch {
+        /* ignore */
+      }
     }
   }
 });
@@ -642,7 +740,7 @@ bot.command("invite", async (ctx) => {
     return;
   }
   const refLink = `https://t.me/${un}?start=ref_${encodeURIComponent(code)}`;
-  const miniLink = webAppUrl ? `https://t.me/${un}?startapp=${encodeURIComponent("vote")}` : "";
+  const miniLink = webAppBase ? `https://t.me/${un}?startapp=${encodeURIComponent("vote")}` : "";
   const lines = [
     "📎 <b>Your invite link</b>",
     "",
@@ -688,6 +786,15 @@ bot.command("petition", async (ctx) => {
   );
 });
 
+bot.command("how", async (ctx) => {
+  await replyHowItWorks(ctx);
+});
+
+bot.callbackQuery("how_it_works", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "👇 Guide below" });
+  await replyHowItWorks(ctx);
+});
+
 bot.command("help", async (ctx) => {
   const uid = String(ctx.from?.id ?? "");
   const alertsOn = await getAlertsOn(uid);
@@ -696,6 +803,7 @@ bot.command("help", async (ctx) => {
       "❓ <b>Commands</b>",
       "",
       "🏠 <code>/start</code> — home menu",
+      "📖 <code>/how</code> — how it works (diagram if <code>HOW_IT_WORKS_PHOTO_URL</code> is set on the bot)",
       "🔍 Mini App → paste Polymarket URL / search (same as menu <b>Search or paste link</b>)",
       "📋 <code>/votes</code> — quick-open indexed disputes",
       "📎 <code>/invite</code> — your referral link + Mini App vote link",
@@ -843,9 +951,9 @@ bot.command("pin_vote_alert", async (ctx) => {
     return;
   }
   const kb = new InlineKeyboard();
-  if (webAppUrl) {
-    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-    kb.webApp("📱 Mini App home", webAppUrl).row();
+  if (webAppBase) {
+    kb.webApp("🗳 Vote in Mini App", miniAppStartUrl(webAppBase, "vote")).row();
+    kb.webApp("📱 Mini App home", webAppBase).row();
   }
   const un = botUsername.replace(/^@/, "");
   const addBotLine =
@@ -1429,12 +1537,12 @@ bot.callbackQuery(/^petition_sign:([a-f0-9]+)$/i, async (ctx) => {
     show_alert: true,
   });
   const pid = ctx.match![1]!.toLowerCase();
-  if (!webAppUrl || !(await ensureInternal(ctx))) return;
+  if (!webAppBase || !(await ensureInternal(ctx))) return;
   await ctx.reply("Open the Mini App, link your wallet once, then sign this petition.", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().webApp(
       "Open Mini App",
-      webAppUrlWithStartParam(webAppUrl, `petition_${pid}`)
+      miniAppStartUrl(webAppBase, `petition_${pid}`)
     ),
   });
 });
@@ -1503,7 +1611,7 @@ bot.on("message:text", async (ctx, next) => {
           "",
           link ? `Share: <a href="${escapeHtml(link)}">${escapeHtml(link)}</a>` : "Set PUBLIC_BOT_USERNAME for a stable share link.",
           "",
-          "For a cover image + dispute link, create from the Mini App <b>Petitions → New petition</b> (this chat flow is text-only).",
+          "For a cover image + required Polymarket dispute link, create from the Mini App <b>Petitions → New petition</b> (this chat flow is text-only and cannot attach a dispute).",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -1605,9 +1713,9 @@ async function runDisputeBatchAlerts() {
   const { telegramIds } = (await sub.json()) as { telegramIds: string[] };
   if (!telegramIds?.length) return;
   const kb = new InlineKeyboard();
-  if (webAppUrl) {
-    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-    kb.webApp("📱 Mini App home", webAppUrl).row();
+  if (webAppBase) {
+    kb.webApp("🗳 Vote in Mini App", miniAppStartUrl(webAppBase, "vote")).row();
+    kb.webApp("📱 Mini App home", webAppBase).row();
   }
   for (const id of telegramIds) {
     try {
@@ -1673,9 +1781,9 @@ async function runDigestOnce() {
     ? data.preview.map((p) => `• ${p}`).join("\n")
     : "• (open Votes in the Mini App)";
   const kb = new InlineKeyboard();
-  if (webAppUrl) {
-    kb.webApp("🗳 Vote in Mini App", webAppUrlWithStartParam(webAppUrl, "vote")).row();
-    kb.webApp("📱 Mini App home", webAppUrl).row();
+  if (webAppBase) {
+    kb.webApp("🗳 Vote in Mini App", miniAppStartUrl(webAppBase, "vote")).row();
+    kb.webApp("📱 Mini App home", webAppBase).row();
   }
   for (const id of data.telegramIds) {
     try {
@@ -1716,7 +1824,14 @@ async function main() {
   await clearWebhookForPolling();
   await bot.start({
     onStart: (info) => {
-      console.log(`Bot @${info.username} running (polling). Mini App: ${webAppUrl || "(set WEB_APP_URL)"}`);
+      console.log(
+        `Bot @${info.username} running (polling). WEB_APP_URL raw: ${webAppBaseRaw ? webAppBaseRaw.slice(0, 72) + (webAppBaseRaw.length > 72 ? "…" : "") : "(empty)"}`
+      );
+      console.log(
+        webAppBase
+          ? `Mini App keyboard URL (https OK): ${webAppBase.slice(0, 80)}${webAppBase.length > 80 ? "…" : ""}`
+          : "[boot] No usable https Mini App URL — inline Web App buttons are disabled (fix WEB_APP_URL or /start will use text-only rows)."
+      );
       console.log(`API_PUBLIC_URL=${apiUrl}`);
       console.log(
         inlineShareEnabled
@@ -1724,7 +1839,15 @@ async function main() {
           : "BOT_INLINE_SHARE off — no switch_inline buttons (safe default; set BOT_INLINE_SHARE=1 after /setinline)."
       );
       if (!internalSecret) console.warn("INTERNAL_API_SECRET is empty — /wallet, /vote, alerts will fail");
-      if (!webAppUrl) console.warn("WEB_APP_URL is empty — Web App menu buttons will be missing");
+      if (!webAppBaseRaw) console.warn("WEB_APP_URL is empty — set it to your deployed Mini App (https only for buttons).");
+      else if (!webAppBase) {
+        console.warn(
+          `WEB_APP_URL is not valid https:// for Telegram keyboards: "${webAppBaseRaw.slice(0, 96)}${webAppBaseRaw.length > 96 ? "…" : ""}"`
+        );
+      }
+      if (!howItWorksPhotoUrl && !howItWorksPhotoFileId) {
+        console.log("HOW_IT_WORKS_PHOTO_* unset — /how sends text guide (set URL or file_id for a diagram image).");
+      }
       if (botUsername && info.username !== botUsername) {
         console.warn(`PUBLIC_BOT_USERNAME (${botUsername}) does not match ${info.username}`);
       }

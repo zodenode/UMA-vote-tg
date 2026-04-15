@@ -10,6 +10,8 @@ export default function LandingNav() {
   const isVoter = path === "/voter";
   const isVotes = path === "/votes";
   const isSwap = path === "/swap";
+  const isPetitions = path === "/petitions" || path.startsWith("/petitions/");
+  const isBlog = path === "/blog" || path.startsWith("/blog/");
 
   const navLink = (to: string, active: boolean, label: string) => (
     <Link to={to} className={`landing-link${active ? " landing-link--active" : ""}`}>
@@ -26,6 +28,8 @@ export default function LandingNav() {
         {navLink("/insure", isInsure, "uma.insure")}
         {navLink("/voter", isVoter, "Voter story")}
         {navLink("/votes", isVotes, "Web votes")}
+        {navLink("/petitions", isPetitions, "Petitions")}
+        {navLink("/blog", isBlog, "Blog")}
         {navLink("/swap", isSwap, "Swap")}
         <a className="landing-btn landing-btn--ghost" href={tgHref} target="_blank" rel="noreferrer">
           Telegram

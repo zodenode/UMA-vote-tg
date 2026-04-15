@@ -164,7 +164,33 @@ export function openDb(filePath: string) {
   `);
   migrateOoMultiChain(db);
   migratePetitionsSchema(db);
+  migrateWebPetitionSessions(db);
+  migratePolymarketConditionCache(db);
   return db;
+}
+
+function migratePolymarketConditionCache(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS polymarket_condition_cache (
+      condition_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      slug TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_pm_condition_cache_updated ON polymarket_condition_cache(updated_at);
+  `);
+}
+
+function migrateWebPetitionSessions(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS web_petition_sessions (
+      token TEXT PRIMARY KEY,
+      wallet_address TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_web_petition_sessions_expires ON web_petition_sessions(expires_at);
+  `);
 }
 
 function migratePetitionsSchema(db: Database.Database) {
@@ -177,6 +203,9 @@ function migratePetitionsSchema(db: Database.Database) {
   }
   if (!pcols.some((c) => c.name === "condition_id")) {
     db.exec(`ALTER TABLE petitions ADD COLUMN condition_id TEXT`);
+  }
+  if (!pcols.some((c) => c.name === "polymarket_slug")) {
+    db.exec(`ALTER TABLE petitions ADD COLUMN polymarket_slug TEXT`);
   }
   const scols = db.prepare(`PRAGMA table_info(petition_signatures)`).all() as { name: string }[];
   if (!scols.some((c) => c.name === "wallet_address")) {

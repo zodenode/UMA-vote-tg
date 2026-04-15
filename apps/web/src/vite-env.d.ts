@@ -3,8 +3,12 @@
 interface ImportMetaEnv {
   readonly VITE_API_URL?: string;
   readonly VITE_PUBLIC_BOT_USERNAME?: string;
+  /** Optional display name in share preview titles (falls back to VITE_PUBLIC_BOT_USERNAME). */
+  readonly VITE_PUBLIC_SHARE_DISPLAY_NAME?: string;
   readonly VITE_MAINNET_RPC_URL?: string;
   readonly VITE_WALLETCONNECT_PROJECT_ID?: string;
+  /** Magic Link publishable API key — enables email/social embedded wallet in the web app. */
+  readonly VITE_MAGIC_PUBLISHABLE_KEY?: string;
 }
 
 interface ImportMeta {

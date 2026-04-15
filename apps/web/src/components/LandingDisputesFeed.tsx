@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { apiGet } from "../api";
 import { encodeVoteFocusToken } from "../voteFocusToken";
+import LandingDisputesContingencyCarousel from "./LandingDisputesContingencyCarousel";
 import LandingVotesFeedLoader from "./LandingVotesFeedLoader";
 
 type LandingDispute = {
@@ -73,6 +74,7 @@ export default function LandingDisputesFeed() {
             Retry
           </button>
         </p>
+        <LandingDisputesContingencyCarousel />
       </section>
     );
   }

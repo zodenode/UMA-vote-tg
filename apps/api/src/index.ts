@@ -7,6 +7,7 @@ import { openDb, getOrCreateUser } from "./db.js";
 import { verifyInitData, parseUserFromInitData } from "./telegramAuth.js";
 import { type PriceRequestSummary } from "./umaSubgraph.js";
 import { loadActivePriceRequests } from "./voteRequests.js";
+import { attachPolymarketTitlesToPriceRequests } from "./priceRequestPolymarketTitles.js";
 import {
   createEthClient,
   createPolygonOoClient,
@@ -27,10 +28,12 @@ import {
   maxNativeWithdrawWei,
 } from "./custodialVoting.js";
 import {
+  enrichDisputeRow,
   enrichDisputesForApi,
   extractConditionIdFromAncillary,
   type PolymarketEnrichment,
 } from "./polymarketEnrichment.js";
+import { searchPetitionsDisputes } from "./petitionDisputeSearch.js";
 import { polymarketSearch } from "./polymarketSearch.js";
 import { fetchPolymarketPriceHistory } from "./polymarketPricesHistory.js";
 import { decodeVoteFocusToken, encodeVoteFocusToken } from "./voteFocusToken.js";
@@ -39,6 +42,24 @@ import {
   type ReversalWatchResult,
 } from "./polymarketReversalSignal.js";
 import { fetchCommonsImageSuggestions } from "./petitionImageSuggestions.js";
+import {
+  batchLoadSignerFaceRows,
+  loadPetitionSignerTableRows,
+  loadSignerFaceRows,
+  signerPreviewDisclaimer,
+  sumIllustrativePotentialWonByPetition,
+  type SignerFaceRow,
+} from "./petitionSignerFaces.js";
+import {
+  buildWebPetitionSignInMessage,
+  deleteWebPetitionSession,
+  insertWebPetitionSession,
+  loadWebPetitionSession,
+  newWebPetitionSessionToken,
+  webSignInMessageValid,
+  webUserIdFromAddress,
+  parseWebUserAddress,
+} from "./webPetitionAuth.js";
 
 const UMA_MAINNET = "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828" as const;
 const WETH_MAINNET = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" as const;
@@ -63,6 +84,7 @@ const petitionMaxCommentChars = Math.min(500, Math.max(0, Number(process.env.PET
 const petitionCreatesPerDay = Math.min(50, Math.max(1, Number(process.env.PETITION_CREATES_PER_DAY ?? "8")));
 const petitionExportIncludesUsername =
   process.env.PETITION_EXPORT_INCLUDES_USERNAME === "1" || process.env.PETITION_EXPORT_INCLUDES_USERNAME === "true";
+const webPetitionSessionTtlDays = Math.min(90, Math.max(1, Number(process.env.WEB_PETITION_SESSION_TTL_DAYS ?? "14")));
 
 const PETITION_LEGAL_NOTE =
   "Community expression only — not legal advice. Signing does not create an attorney–client relationship or a lawsuit. Operators do not endorse petition claims.";
@@ -224,7 +246,95 @@ function requireInitData(initData: string | undefined) {
   return { ok: true as const, userId: String(user.id) };
 }
 
+type MeActor = { ok: true; userId: string } | { ok: false; status: number; message: string };
+
+function extractBearer(req: { headers: Record<string, string | string[] | undefined> }): string {
+  const h = req.headers.authorization;
+  return typeof h === "string" && h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
+}
+
+/** Optional Telegram initData (query) or web petition session (Authorization) for public GET helpers. */
+function viewerIdFromOptionalPublicAuth(req: {
+  headers: Record<string, string | string[] | undefined>;
+  query: Record<string, string | string[] | undefined>;
+}): string | null {
+  const initDataRaw = req.query.initData;
+  const initData = Array.isArray(initDataRaw) ? initDataRaw[0] : initDataRaw;
+  const init = (initData ?? "").trim();
+  if (init && botToken && verifyInitData(init, botToken)) {
+    const user = parseUserFromInitData(init);
+    if (user?.id) return String(user.id);
+  }
+  const token = extractBearer(req);
+  if (!token) return null;
+  const srow = loadWebPetitionSession(db, token);
+  if (!srow) return null;
+  return webUserIdFromAddress(srow.wallet_address);
+}
+
+/** Telegram initData (if present) takes precedence over browser wallet session. */
+function resolveMeActor(
+  req: { headers: Record<string, string | string[] | undefined> },
+  initData: string | undefined
+): MeActor {
+  const init = (initData ?? "").trim();
+  if (init) {
+    const v = requireInitData(init);
+    if (v.ok) return { ok: true, userId: v.userId };
+    return { ok: false, status: v.status, message: v.message };
+  }
+  const token = extractBearer(req);
+  if (!token) return { ok: false, status: 401, message: "Missing initData or Authorization bearer session" };
+  const row = loadWebPetitionSession(db, token);
+  if (!row) return { ok: false, status: 401, message: "Invalid or expired web session" };
+  const wid = webUserIdFromAddress(row.wallet_address);
+  if (!wid) return { ok: false, status: 401, message: "Invalid session record" };
+  return { ok: true, userId: wid };
+}
+
 app.get("/health", async () => ({ ok: true }));
+
+app.post("/api/web/petition/challenge", async () => {
+  const issuedAt = new Date().toISOString();
+  return { message: buildWebPetitionSignInMessage(issuedAt), issuedAt };
+});
+
+app.post<{ Body: { message?: string; signature?: Hex; issuedAt?: string } }>(
+  "/api/web/petition/verify",
+  async (req, reply) => {
+    const message = (req.body?.message ?? "").trim();
+    const signature = (req.body?.signature ?? "").trim() as Hex;
+    const issuedAt = (req.body?.issuedAt ?? "").trim();
+    if (!message || !signature || !issuedAt) {
+      return reply.status(400).send({ error: "message, signature, and issuedAt required" });
+    }
+    if (!issuedAtFresh(issuedAt)) return reply.status(400).send({ error: "issuedAt expired or invalid" });
+    if (!webSignInMessageValid(message, issuedAt)) {
+      return reply.status(400).send({ error: "message mismatch" });
+    }
+    let recoveredRaw: string;
+    try {
+      recoveredRaw = await recoverMessageAddress({ message, signature });
+    } catch {
+      return reply.status(400).send({ error: "Invalid signature" });
+    }
+    const addr = normalizeLinkedEthAddress(recoveredRaw);
+    if (!addr) return reply.status(400).send({ error: "Could not recover address" });
+    const token = newWebPetitionSessionToken();
+    insertWebPetitionSession(db, token, addr, webPetitionSessionTtlDays);
+    const userId = webUserIdFromAddress(addr);
+    if (!userId) return reply.status(500).send({ error: "internal" });
+    getOrCreateUser(db, userId, null);
+    return { ok: true, token, userId, address: addr, ttlDays: webPetitionSessionTtlDays };
+  }
+);
+
+app.post("/api/web/petition/sign-out", async (req, reply) => {
+  const token = extractBearer(req);
+  if (!token) return reply.status(400).send({ error: "Bearer token required" });
+  deleteWebPetitionSession(db, token);
+  return { ok: true };
+});
 
 app.get<{
   Querystring: { q?: string; limit?: string };
@@ -239,6 +349,22 @@ app.get<{
   } catch (e) {
     req.log.warn(e, "polymarket search failed");
     return reply.status(502).send({ error: "Polymarket search unavailable" });
+  }
+});
+
+app.get<{
+  Querystring: { q?: string; limit?: string };
+}>("/api/petitions/dispute-search", async (req, reply) => {
+  const q = String(req.query.q ?? "").trim();
+  if (q.length < 2) return { hits: [] };
+  if (q.length > 240) return reply.status(400).send({ error: "q too long" });
+  const limit = Math.min(18, Math.max(1, Number(req.query.limit ?? 12)));
+  try {
+    const hits = await searchPetitionsDisputes(db, q, limit);
+    return { hits };
+  } catch (e) {
+    req.log.warn(e, "petition dispute search failed");
+    return reply.status(502).send({ error: "Dispute search temporarily unavailable" });
   }
 });
 
@@ -624,6 +750,15 @@ app.get<{ Params: { code: string } }>("/api/referrals/:code", async (req, reply)
   return { ok: true };
 });
 
+function petitionBodySnippet(body: string, maxLen = 200): string {
+  const s = body.replace(/\s+/g, " ").trim();
+  if (s.length <= maxLen) return s;
+  let cut = s.slice(0, maxLen - 1);
+  const sp = cut.lastIndexOf(" ");
+  if (sp > Math.floor(maxLen * 0.55)) cut = cut.slice(0, sp);
+  return `${cut}…`;
+}
+
 function newPetitionId(): string {
   for (let attempt = 0; attempt < 8; attempt++) {
     const id = randomBytes(12).toString("hex");
@@ -677,8 +812,8 @@ function buildWalletLinkMessage(telegramId: string, issuedAt: string): string {
   return `UMA Vote TG — verify wallet ownership\nTelegram user ID: ${telegramId}\nIssued at (UTC): ${issuedAt}`;
 }
 
-function buildPetitionSignMessage(telegramId: string, petitionId: string, issuedAt: string): string {
-  return `UMA Vote TG — sign community petition\nPetition ID: ${petitionId}\nTelegram user ID: ${telegramId}\nIssued at (UTC): ${issuedAt}`;
+function buildPetitionSignMessage(signerAccount: string, petitionId: string, issuedAt: string): string {
+  return `UMA Vote — sign community petition\nPetition ID: ${petitionId}\nSigner account: ${signerAccount}\nIssued at (UTC): ${issuedAt}`;
 }
 
 function getLinkedWalletRow(telegramId: string): { address: string } | undefined {
@@ -732,8 +867,10 @@ async function petitionWalletSignCore(
   if (row.hidden) return { status: 403, error: "Petition is hidden" };
   if (row.closed_at) return { status: 403, error: "Petition is closed" };
   const linked = getLinkedWalletRow(telegramId);
-  if (!linked || linked.address.toLowerCase() !== walletAddress.toLowerCase()) {
-    return { status: 403, error: "Wallet not linked to this Telegram account" };
+  const webAddr = parseWebUserAddress(telegramId);
+  const effectiveAddr = linked?.address ?? (webAddr ? webAddr : null);
+  if (!effectiveAddr || effectiveAddr.toLowerCase() !== walletAddress.toLowerCase()) {
+    return { status: 403, error: "Wallet not linked to this account" };
   }
   let recovered: `0x${string}`;
   try {
@@ -769,15 +906,19 @@ type PetitionRow = {
   image_url: string | null;
   dispute_key: string | null;
   condition_id: string | null;
+  polymarket_slug: string | null;
 };
 
 function buildPetitionResponse(row: PetitionRow, viewerTelegramId: string | null) {
   const { total: signatureCount, verified: verifiedSignatureCount } = petitionSignatureCounts(row.id);
   const viewerIsCreator = Boolean(viewerTelegramId && viewerTelegramId === row.creator_telegram_id);
   const disputeFocusToken = row.dispute_key ? encodeVoteFocusToken(row.dispute_key) : null;
-  const polymarketUrl = row.condition_id
-    ? `https://polymarket.com/condition/${encodeURIComponent(row.condition_id)}`
-    : null;
+  const slug = (row.polymarket_slug ?? "").trim();
+  const polymarketUrl = slug
+    ? `https://polymarket.com/market/${encodeURIComponent(slug)}`
+    : row.condition_id
+      ? `https://polymarket.com/condition/${encodeURIComponent(row.condition_id)}`
+      : null;
   if (row.hidden && !viewerIsCreator) {
     return {
       id: row.id,
@@ -812,7 +953,24 @@ function buildPetitionResponse(row: PetitionRow, viewerTelegramId: string | null
   };
 }
 
-app.get("/api/petitions/active", async () => {
+function attachSignerPreviewToPublic(
+  pub: ReturnType<typeof buildPetitionResponse>,
+  petitionId: string,
+  conditionId: string | null
+): ReturnType<typeof buildPetitionResponse> & {
+  signerPreview: SignerFaceRow[];
+  signerPreviewNote: string;
+} {
+  if (pub.hidden) {
+    return { ...pub, signerPreview: [], signerPreviewNote: signerPreviewDisclaimer() };
+  }
+  const signerPreview = loadSignerFaceRows(db, petitionId, 12, conditionId);
+  return { ...pub, signerPreview, signerPreviewNote: signerPreviewDisclaimer() };
+}
+
+app.get<{
+  Querystring: { sort?: string };
+}>("/api/petitions/active", async (req) => {
   const rows = db
     .prepare(
       `SELECT p.* FROM petitions p
@@ -821,14 +979,25 @@ app.get("/api/petitions/active", async () => {
        LIMIT 80`
     )
     .all() as PetitionRow[];
+  const sortRaw = String(req.query.sort ?? "").trim().toLowerCase();
+  const sortByPotentialWon = sortRaw === "potential-won" || sortRaw === "potentialwon" || sortRaw === "win";
+  const ids = rows.map((r) => r.id);
+  const condMap = new Map(rows.map((r) => [r.id, r.condition_id ?? null] as const));
+  const facesMap = batchLoadSignerFaceRows(db, ids, 4, condMap);
+  const winSums = sumIllustrativePotentialWonByPetition(db, ids, condMap);
+  const ordered = sortByPotentialWon
+    ? [...rows].sort((a, b) => (winSums.get(b.id) ?? 0) - (winSums.get(a.id) ?? 0))
+    : rows;
   return {
-    petitions: rows.map((r) => {
+    sort: sortByPotentialWon ? ("potential-won" as const) : ("recent" as const),
+    petitions: ordered.map((r) => {
       const pub = buildPetitionResponse(r, null);
       return {
         id: pub.id,
         title: pub.title,
         hidden: pub.hidden,
         imageUrl: pub.imageUrl,
+        bodySnippet: petitionBodySnippet(r.body),
         disputeKey: pub.disputeKey,
         conditionId: pub.conditionId,
         disputeFocusToken: pub.disputeFocusToken,
@@ -836,6 +1005,9 @@ app.get("/api/petitions/active", async () => {
         signatureCount: pub.signatureCount,
         verifiedSignatureCount: pub.verifiedSignatureCount,
         createdAt: pub.createdAt,
+        illustrativePotentialWonSumUsd: winSums.get(r.id) ?? 0,
+        signerPreview: facesMap.get(r.id) ?? [],
+        signerPreviewNote: signerPreviewDisclaimer(),
       };
     }),
   };
@@ -854,11 +1026,35 @@ app.get<{ Params: { id: string }; Querystring: { initData?: string } }>("/api/pe
     const u = parseUserFromInitData(initData);
     if (u?.id) viewerId = String(u.id);
   }
-  return buildPetitionResponse(row, viewerId);
+  const pub = buildPetitionResponse(row, viewerId);
+  return attachSignerPreviewToPublic(pub, row.id, row.condition_id ?? null);
 });
 
+app.get<{ Params: { id: string }; Querystring: { initData?: string } }>(
+  "/api/petitions/:id/signers",
+  async (req, reply) => {
+    const rawId = (req.params.id ?? "").trim().toLowerCase();
+    if (!rawId || rawId.length > 64 || !/^[a-f0-9]+$/.test(rawId)) {
+      return reply.status(400).send({ error: "Invalid petition id" });
+    }
+    const row = db.prepare(`SELECT * FROM petitions WHERE id = ?`).get(rawId) as PetitionRow | undefined;
+    if (!row) return reply.status(404).send({ error: "Not found" });
+    const viewerId = viewerIdFromOptionalPublicAuth(req);
+    const viewerIsCreator = Boolean(viewerId && viewerId === row.creator_telegram_id);
+    if (row.hidden && !viewerIsCreator) {
+      return reply.status(403).send({ error: "Signer list not available for this petition" });
+    }
+    const signers = loadPetitionSignerTableRows(db, rawId, row.condition_id ?? null);
+    return {
+      signers,
+      amountNote: signerPreviewDisclaimer(),
+      emailNote: "Email is not collected on signatures yet; this column is reserved for a future optional step.",
+    };
+  }
+);
+
 app.post<{ Body: { initData?: string; petitionId?: string } }>("/api/me/petition/fetch", async (req, reply) => {
-  const v = requireInitData(req.body?.initData);
+  const v = resolveMeActor(req, req.body?.initData);
   if (!v.ok) return reply.status(v.status).send({ error: v.message });
   const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
   if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
@@ -866,15 +1062,17 @@ app.post<{ Body: { initData?: string; petitionId?: string } }>("/api/me/petition
   }
   const row = db.prepare(`SELECT * FROM petitions WHERE id = ?`).get(petitionId) as PetitionRow | undefined;
   if (!row) return reply.status(404).send({ error: "Not found" });
-  return buildPetitionResponse(row, v.userId);
+  const pub = buildPetitionResponse(row, v.userId);
+  return attachSignerPreviewToPublic(pub, row.id, row.condition_id ?? null);
 });
 
 app.post<{ Body: { initData?: string } }>("/api/me/wallet/status", async (req, reply) => {
-  const v = requireInitData(req.body?.initData);
+  const v = resolveMeActor(req, req.body?.initData);
   if (!v.ok) return reply.status(v.status).send({ error: v.message });
   getOrCreateUser(db, v.userId, null);
   const row = getLinkedWalletRow(v.userId);
-  return { linked: Boolean(row), address: row?.address ?? null };
+  const webAddr = parseWebUserAddress(v.userId);
+  return { linked: Boolean(row?.address || webAddr), address: row?.address ?? webAddr ?? null };
 });
 
 app.post<{ Body: { initData?: string } }>("/api/me/wallet/link-challenge", async (req, reply) => {
@@ -927,16 +1125,21 @@ app.post<{
 app.post<{ Body: { initData?: string; petitionId?: string } }>(
   "/api/me/petition/sign-challenge",
   async (req, reply) => {
-    const v = requireInitData(req.body?.initData);
+    const v = resolveMeActor(req, req.body?.initData);
     if (!v.ok) return reply.status(v.status).send({ error: v.message });
     const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
     if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
       return reply.status(400).send({ error: "petitionId required" });
     }
     const linked = getLinkedWalletRow(v.userId);
-    if (!linked) {
-      return reply.status(400).send({ error: "Link an Ethereum wallet in the Mini App before signing" });
+    const webAddr = parseWebUserAddress(v.userId);
+    if (!linked?.address && !webAddr) {
+      return reply.status(400).send({
+        error:
+          "No signing wallet on this account. Sign in with Ethereum from the web (petitions → new), or link a wallet from the Telegram Mini App.",
+      });
     }
+    const linkedAddress = (linked?.address ?? webAddr) as string;
     const prow = db.prepare(`SELECT id, hidden, closed_at FROM petitions WHERE id = ?`).get(petitionId) as
       | { id: string; hidden: number; closed_at: string | null }
       | undefined;
@@ -945,7 +1148,7 @@ app.post<{ Body: { initData?: string; petitionId?: string } }>(
     if (prow.closed_at) return reply.status(403).send({ error: "Petition is closed" });
     const issuedAt = new Date().toISOString();
     const message = buildPetitionSignMessage(v.userId, petitionId, issuedAt);
-    return { message, issuedAt, linkedAddress: linked.address };
+    return { message, issuedAt, linkedAddress };
   }
 );
 
@@ -959,7 +1162,7 @@ app.post<{
     comment?: string | null;
   };
 }>("/api/me/petition/sign", async (req, reply) => {
-  const v = requireInitData(req.body?.initData);
+  const v = resolveMeActor(req, req.body?.initData);
   if (!v.ok) return reply.status(v.status).send({ error: v.message });
   const petitionId = (req.body?.petitionId ?? "").trim().toLowerCase();
   if (!petitionId || !/^[a-f0-9]+$/.test(petitionId)) {
@@ -986,6 +1189,7 @@ app.post<{
   }
   const walletAddress = normalizeLinkedEthAddress(recoveredRaw);
   if (!walletAddress) return reply.status(400).send({ error: "Could not recover address" });
+  getOrCreateUser(db, v.userId, null);
   const out = await petitionWalletSignCore(v.userId, petitionId, comment, walletAddress, message, signature);
   if ("error" in out) return reply.status(out.status).send({ error: out.error });
   return {
@@ -999,7 +1203,7 @@ app.post<{
 app.post<{
   Body: { initData?: string; query?: string };
 }>("/api/me/petition/image-suggestions", async (req, reply) => {
-  const v = requireInitData(req.body?.initData);
+  const v = resolveMeActor(req, req.body?.initData);
   if (!v.ok) return reply.status(v.status).send({ error: v.message });
   getOrCreateUser(db, v.userId, null);
   const raw = (req.body?.query ?? "").trim();
@@ -1028,36 +1232,58 @@ app.post<{
     conditionId?: string;
   };
 }>("/api/me/petition/create", async (req, reply) => {
-  const v = requireInitData(req.body?.initData);
+  const v = resolveMeActor(req, req.body?.initData);
   if (!v.ok) return reply.status(v.status).send({ error: v.message });
   const title = (req.body?.title ?? "").trim();
   const body = (req.body?.body ?? "").trim();
   const imageUrl = validatePetitionImageUrl(req.body?.imageUrl);
-  const disputeKeyRaw = (req.body?.disputeKey ?? "").trim() || null;
+  const disputeKeyRaw = (req.body?.disputeKey ?? "").trim();
   const conditionNorm = normalizeConditionId(req.body?.conditionId);
   if (!title || !body) return reply.status(400).send({ error: "title and body required" });
   if (!imageUrl) return reply.status(400).send({ error: "A valid https imageUrl is required" });
   if (title.length > petitionMaxTitleChars || body.length > petitionMaxBodyChars) {
     return reply.status(400).send({ error: "title or body too long" });
   }
-  let disputeKey: string | null = disputeKeyRaw;
-  if (disputeKey) {
-    const dr = loadDisputeRowByKey(disputeKey);
-    if (!dr) return reply.status(400).send({ error: "disputeKey not found in indexed disputes" });
+  if (!disputeKeyRaw) {
+    return reply.status(400).send({
+      error: "Select the indexed Polymarket dispute this petition is about (use search, then pick a result).",
+    });
   }
+  const dr = loadDisputeRowByKey(disputeKeyRaw);
+  if (!dr) return reply.status(400).send({ error: "disputeKey not found in indexed disputes" });
+
   let conditionId: string | null = conditionNorm;
-  if (conditionId && disputeKey) {
-    const byC = findDisputeRowByConditionId(conditionId);
-    if (!byC || byC.dispute_key !== disputeKey) {
-      return reply.status(400).send({ error: "conditionId does not match the selected dispute" });
-    }
-  } else if (conditionId && !disputeKey) {
-    const byC = findDisputeRowByConditionId(conditionId);
-    if (!byC) {
-      return reply.status(400).send({ error: "conditionId not found on an indexed Polymarket dispute" });
-    }
-    disputeKey = byC.dispute_key;
+  if (!conditionId) conditionId = extractConditionIdFromAncillary(dr.ancillary_data);
+  if (!conditionId || !/^0x[a-f0-9]{64}$/i.test(conditionId)) {
+    return reply.status(400).send({
+      error:
+        "Could not resolve a Polymarket condition id for this dispute. Choose another market from search, or contact support if this dispute should be linkable.",
+    });
   }
+  conditionId = conditionId.toLowerCase();
+  const byC = findDisputeRowByConditionId(conditionId);
+  if (!byC || byC.dispute_key !== disputeKeyRaw) {
+    return reply.status(400).send({ error: "conditionId does not match the selected dispute" });
+  }
+
+  let polymarketSlug: string | null = null;
+  try {
+    const pm = await enrichDisputeRow({
+      dispute_key: dr.dispute_key,
+      ancillary_data: dr.ancillary_data,
+      proposed_price: dr.proposed_price,
+    });
+    polymarketSlug = pm?.slug?.trim() || null;
+    if (pm?.conditionId && pm.conditionId.trim().toLowerCase() !== conditionId) {
+      req.log.warn(
+        { disputeKey: disputeKeyRaw, conditionId, gammaCid: pm.conditionId },
+        "Gamma conditionId mismatch vs ancillary on petition create"
+      );
+    }
+  } catch (e) {
+    req.log.warn(e, "enrichDisputeRow on petition create");
+  }
+
   getOrCreateUser(db, v.userId, null);
   const since = db
     .prepare(
@@ -1069,9 +1295,9 @@ app.post<{
   }
   const id = newPetitionId();
   db.prepare(
-    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at, image_url, dispute_key, condition_id)
-     VALUES (?, ?, ?, ?, 0, datetime('now'), ?, ?, ?)`
-  ).run(id, v.userId, title, body, imageUrl, disputeKey, conditionId);
+    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at, image_url, dispute_key, condition_id, polymarket_slug)
+     VALUES (?, ?, ?, ?, 0, datetime('now'), ?, ?, ?, ?)`
+  ).run(id, v.userId, title, body, imageUrl, disputeKeyRaw, conditionId, polymarketSlug);
   return { ok: true, id, legalNote: PETITION_LEGAL_NOTE };
 });
 
@@ -1099,8 +1325,8 @@ app.post<{
   }
   const id = newPetitionId();
   db.prepare(
-    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at, image_url, dispute_key, condition_id)
-     VALUES (?, ?, ?, ?, 0, datetime('now'), NULL, NULL, NULL)`
+    `INSERT INTO petitions (id, creator_telegram_id, title, body, hidden, created_at, image_url, dispute_key, condition_id, polymarket_slug)
+     VALUES (?, ?, ?, ?, 0, datetime('now'), NULL, NULL, NULL, NULL)`
   ).run(id, telegramId, title, body);
   return { ok: true, id, legalNote: PETITION_LEGAL_NOTE };
 });
@@ -1762,6 +1988,19 @@ app.post<{
   const ins = db.prepare(`INSERT OR IGNORE INTO dispute_alert_sent (dispute_key) VALUES (?)`);
   for (const k of keys) ins.run(k);
   return { ok: true, marked: keys.length };
+});
+
+app.get<{ Querystring: { secret?: string } }>("/api/cron/warm-polymarket-titles", async (req, reply) => {
+  if (!assertCron(req, reply)) return;
+  const { requests } = await loadActivePriceRequests(graphKey, ethClient, 40);
+  if (!requests.length) return { ok: true, requests: 0, conditionIds: 0 };
+  await attachPolymarketTitlesToPriceRequests(db, requests, 6);
+  const cids = new Set<string>();
+  for (const r of requests) {
+    const c = r.ancillaryData ? extractConditionIdFromAncillary(r.ancillaryData) : null;
+    if (c) cids.add(c.toLowerCase());
+  }
+  return { ok: true, requests: requests.length, conditionIds: cids.size };
 });
 
 app.get<{ Querystring: { secret?: string } }>("/api/cron/digest-recipients", async (req, reply) => {

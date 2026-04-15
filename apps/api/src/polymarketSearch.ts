@@ -90,6 +90,22 @@ async function fetchMarketsByConditionId(conditionId: string): Promise<Polymarke
   return toHit(arr[0]!);
 }
 
+/** Gamma market question by condition id (slug optional — some payloads omit it). */
+export async function polymarketQuestionByConditionId(
+  conditionId: string
+): Promise<{ title: string; slug: string | null } | null> {
+  const id = normConditionId(conditionId);
+  if (!id) return null;
+  const url = `https://gamma-api.polymarket.com/markets?condition_ids=${encodeURIComponent(id)}`;
+  const arr = (await fetchJson(url)) as GammaMarketLite[] | null;
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const m = arr[0] as GammaMarketLite;
+  const title = (m?.question ?? "").trim();
+  if (!title) return null;
+  const slug = m.slug?.trim() || null;
+  return { title, slug };
+}
+
 async function publicSearch(q: string, limit: number): Promise<PolymarketSearchHit[]> {
   const cap = Math.min(25, Math.max(limit, 1));
   const url = `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(q)}&limit_per_type=${cap}&search_profiles=false`;

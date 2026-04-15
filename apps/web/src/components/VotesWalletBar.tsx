@@ -1,9 +1,11 @@
 import { mainnet } from "wagmi/chains";
 import { useAccount, useConnect, useChainId, useSwitchChain } from "wagmi";
+import PolymarketWalletBanner from "./PolymarketWalletBanner";
 
 const walletConnectConfigured = Boolean(
   (import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined)?.trim()
 );
+const magicConfigured = Boolean((import.meta.env.VITE_MAGIC_PUBLISHABLE_KEY as string | undefined)?.trim());
 
 export default function VotesWalletBar() {
   const { address, isConnected } = useAccount();
@@ -18,12 +20,12 @@ export default function VotesWalletBar() {
       <p className="muted" style={{ marginTop: 0 }}>
         Disputes usually appear on <b>Polygon</b> first. Commit and reveal are signed on <b>Ethereum mainnet</b> — connect
         your wallet below.
-        {!walletConnectConfigured ? (
+        {!walletConnectConfigured && !magicConfigured ? (
           <>
             {" "}
             <span className="muted">
-              (WalletConnect is not configured for this build; use an injected wallet such as MetaMask when the browser
-              supports it.)
+              (WalletConnect and Magic are not configured; use MetaMask, Coinbase Wallet, or another injected browser
+              wallet.)
             </span>
           </>
         ) : null}
@@ -56,9 +58,12 @@ export default function VotesWalletBar() {
           </button>
         </div>
       ) : (
-        <p className="muted" style={{ marginTop: 8 }}>
-          Connected <code>{address?.slice(0, 6)}…{address?.slice(-4)}</code>
-        </p>
+        <>
+          <p className="muted" style={{ marginTop: 8 }}>
+            Connected <code>{address?.slice(0, 6)}…{address?.slice(-4)}</code>
+          </p>
+          <PolymarketWalletBanner />
+        </>
       )}
     </div>
   );

@@ -2,6 +2,8 @@ export type DvmTiming = {
   phase: "commit" | "reveal";
   roundId: string;
   phaseLengthSec: number;
+  /** Chain time (unix sec) when timing was computed; optional on older payloads. */
+  chainTimestamp?: number;
   secondsLeftInPhase: number;
   phaseEndsAt: number;
   roundEndsAt: number;
@@ -60,6 +62,8 @@ export type VoteReq = {
   ancillaryData: string | null;
   roundId: string | null;
   participationPct: string | null;
+  /** Polymarket Gamma question when ancillary contains a condition id (from API cache). */
+  polymarketTitle?: string | null;
 };
 
 export type VotesPayload = {

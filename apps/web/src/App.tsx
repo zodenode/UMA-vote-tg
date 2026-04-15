@@ -11,7 +11,11 @@ import VoteDisputeDetail from "./pages/VoteDisputeDetail";
 import Account from "./pages/Account";
 import PetitionDetail from "./pages/PetitionDetail";
 import PetitionsHome from "./pages/PetitionsHome";
+import PetitionsLanding from "./pages/PetitionsLanding";
+import PetitionsBrowse from "./pages/PetitionsBrowse";
 import PetitionCreate from "./pages/PetitionCreate";
+import BlogIndex from "./pages/BlogIndex";
+import BlogPost from "./pages/BlogPost";
 import { apiPost, getInitData, getStartParam } from "./api";
 import { SessionProvider, type Session } from "./session";
 
@@ -45,6 +49,10 @@ function getMobileNavSnapshot() {
 
 function getMobileNavServerSnapshot() {
   return false;
+}
+
+function PetitionsHubRoute() {
+  return Boolean(getInitData()) ? <PetitionsHome /> : <PetitionsLanding />;
 }
 
 function VoteStartRedirect() {
@@ -91,8 +99,15 @@ export default function App() {
     getMobileNavServerSnapshot
   );
   const path = location.pathname;
+  const onBlog = path === "/blog" || path.startsWith("/blog/");
+  const petitionsMarketingHub = !miniApp && path === "/petitions";
   const onLanding =
-    path === "/welcome" || path === "/insure" || path === "/voter" || (path === "/" && !miniApp);
+    path === "/welcome" ||
+    path === "/insure" ||
+    path === "/voter" ||
+    onBlog ||
+    petitionsMarketingHub ||
+    (path === "/" && !miniApp);
   const onVotesSection = path === "/votes" || path.startsWith("/votes/");
   const onPetitionSection = path === "/petitions" || path.startsWith("/petitions/");
   const onMobileWebShell =
@@ -101,6 +116,7 @@ export default function App() {
       path === "/welcome" ||
       path === "/voter" ||
       path === "/insure" ||
+      onBlog ||
       path === "/swap" ||
       onVotesSection ||
       onPetitionSection ||
@@ -119,6 +135,11 @@ export default function App() {
     window.Telegram?.WebApp && window.addEventListener("theme_changed", onChange);
     return () => window.removeEventListener("theme_changed", onChange);
   }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle("uma-tg-miniapp", miniApp);
+    return () => document.body.classList.remove("uma-tg-miniapp");
+  }, [miniApp]);
 
   useEffect(() => {
     const initData = getInitData();
@@ -215,9 +236,12 @@ export default function App() {
             <Route path="/swap" element={<Swap />} />
             <Route path="/votes" element={<Votes />} />
             <Route path="/votes/dispute/:token" element={<VoteDisputeDetail />} />
-            <Route path="/petitions" element={<PetitionsHome />} />
+            <Route path="/petitions" element={<PetitionsHubRoute />} />
+            <Route path="/petitions/browse" element={<PetitionsBrowse />} />
             <Route path="/petitions/new" element={<PetitionCreate />} />
             <Route path="/petitions/:id" element={<PetitionDetail />} />
+            <Route path="/blog" element={<BlogIndex />} />
+            <Route path="/blog/:slug" element={<BlogPost />} />
             <Route path="/account" element={<Account />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

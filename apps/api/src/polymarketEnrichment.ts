@@ -41,29 +41,106 @@ function hexToUtf8(hex: string): string {
   }
 }
 
-/** Extract first plausible Polymarket condition id (32-byte hash) from ancillary text. */
-export function extractConditionIdFromAncillary(ancillaryHex: string): string | null {
+/** JSON keys that hold the CTF / Gamma market condition id (try these before any other 0x+64). */
+const CONDITION_ID_JSON_KEYS = [
+  "condition_id",
+  "conditionId",
+  "conditionID",
+  "ctfConditionId",
+  "parentConditionId",
+] as const;
+
+const PREFERRED_LEAF_KEYS = new Set(CONDITION_ID_JSON_KEYS.map((k) => k.toLowerCase()));
+
+/**
+ * JSON keys whose 0x+64 values are usually *not* Polymarket Gamma `condition_ids`
+ * (e.g. keccak digests, UMA question ids).
+ */
+const DEPRIORITIZED_JSON_KEYS = new Set(
+  [
+    "questionid",
+    "questionId",
+    "questionID",
+    "ancillarydatahash",
+    "ancillaryDataHash",
+    "requesthash",
+    "requestHash",
+    "digest",
+    "salt",
+  ].map((s) => s.toLowerCase())
+);
+
+function pathHasHashySegment(path: string[]): boolean {
+  return path.some((p) => /hash|digest|signature/i.test(p));
+}
+
+/**
+ * Ordered Polymarket / CTF condition id candidates for Gamma `markets?condition_ids=`.
+ * Important: ancillary often contains *several* 32-byte hex strings (hashes, question ids).
+ * Returning the wrong one first makes every market look "missing" even when Gamma has it.
+ */
+export function listPolymarketConditionIdCandidates(ancillaryHex: string): string[] {
   const text = hexToUtf8(ancillaryHex);
-  const candidates = new Set<string>();
-  const re = /0x[a-fA-F]{64}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    candidates.add(m[0].toLowerCase());
-  }
+  /** 0 = explicit condition keys, 1 = other JSON hex, 2 = plain-text hex (no "hash" nearby), 3 = hash-ish / last resort */
+  const tiers: [string[], string[], string[], string[]] = [[], [], [], []];
+  const seen = new Set<string>();
+  const push = (tier: 0 | 1 | 2 | 3, cid: string) => {
+    const k = cid.toLowerCase();
+    if (!/^0x[a-f0-9]{64}$/.test(k) || seen.has(k)) return;
+    seen.add(k);
+    tiers[tier].push(k);
+  };
+
+  let root: unknown = null;
   try {
-    const j = JSON.parse(text) as Record<string, unknown>;
-    const walk = (v: unknown) => {
-      if (typeof v === "string" && /^0x[a-fA-F]{64}$/.test(v)) candidates.add(v.toLowerCase());
-      else if (v && typeof v === "object") {
-        for (const x of Object.values(v as object)) walk(x);
+    root = JSON.parse(text) as unknown;
+  } catch {
+    root = null;
+  }
+
+  if (root && typeof root === "object") {
+    const walk = (node: unknown, path: string[]) => {
+      if (typeof node === "string" && /^0x[0-9a-fA-F]{64}$/i.test(node)) {
+        const leaf = path[path.length - 1] ?? "";
+        const lk = leaf.toLowerCase();
+        if (PREFERRED_LEAF_KEYS.has(lk)) push(0, node);
+        else if (DEPRIORITIZED_JSON_KEYS.has(lk) || pathHasHashySegment(path)) push(3, node);
+        else push(1, node);
+        return;
+      }
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item, path);
+        return;
+      }
+      if (node && typeof node === "object") {
+        for (const [k, v] of Object.entries(node as object)) {
+          walk(v, [...path, k]);
+        }
       }
     };
-    walk(j);
-  } catch {
-    /* not JSON */
+    walk(root, []);
   }
-  for (const c of candidates) return c;
-  return null;
+
+  /** Line-local context: a 96-char window can span a previous line and falsely tag a real `condition_id` as "hashy". */
+  const re = /0x[0-9a-fA-F]{64}/g;
+  for (const line of text.split(/\n/)) {
+    const lineHashy = /hash|digest/i.test(line);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      const k = m[0].toLowerCase();
+      if (seen.has(k)) continue;
+      push(lineHashy ? 3 : 2, m[0]);
+    }
+    re.lastIndex = 0;
+  }
+
+  return [...tiers[0], ...tiers[1], ...tiers[2], ...tiers[3]];
+}
+
+/** Best single condition id for backwards-compatible call sites (petitions, disputes). */
+export function extractConditionIdFromAncillary(ancillaryHex: string): string | null {
+  const c = listPolymarketConditionIdCandidates(ancillaryHex);
+  return c[0] ?? null;
 }
 
 async function fetchJson(url: string): Promise<unknown> {

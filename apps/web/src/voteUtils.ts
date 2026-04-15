@@ -1,4 +1,5 @@
 import type { Hex } from "viem";
+import type { Dispute, VoteReq } from "./voteTypes";
 
 function hexToBytes(hex: string): Uint8Array {
   const h = hex.replace(/^0x/i, "");
@@ -53,11 +54,58 @@ export type AncillarySummary = {
   outcomes: string[] | null;
 };
 
+/**
+ * Polymarket Managed Optimistic Oracle (Polygon) often encodes ancillary as plain text:
+ * `q: title: …, description: … market_id: …` (not JSON, no CTF condition id).
+ */
+export function extractPolymarketManagedOoTitle(utf8: string): string | null {
+  const headQ = /(^|[\n\r])\s*q:\s*title:\s*/im;
+  const mq = headQ.exec(utf8);
+  if (mq) {
+    const start = mq.index + mq[0].length;
+    const tail = utf8.slice(start);
+    const d = tail.search(/,\s*description:\s*/i);
+    if (d >= 0) {
+      const t = tail.slice(0, d).trim().replace(/\s+/g, " ");
+      if (t.length >= 8) return t;
+    }
+  }
+  const headT = /(^|[\n\r])\s*title:\s*/im;
+  const mt = headT.exec(utf8);
+  if (mt && mt.index < 160) {
+    const start = mt.index + mt[0].length;
+    const tail = utf8.slice(start);
+    const d = tail.search(/,\s*description:\s*/i);
+    if (d >= 0) {
+      const t = tail.slice(0, d).trim().replace(/\s+/g, " ");
+      if (t.length >= 8) return t;
+    }
+  }
+  return null;
+}
+
+/** `Where p1 corresponds to No, p2 to Yes, p3 to unknown.` (Managed OO template). */
+function parsePolymarketManagedOoOutcomes(utf8: string): string[] | null {
+  const m = utf8.match(
+    /p1 corresponds to\s*([^,]+?)\s*,\s*p2 to\s*([^,]+?)\s*,\s*p3 to\s*([^.]+?)\s*\./i
+  );
+  if (!m) return null;
+  const out = [m[1], m[2], m[3]].map((s) => s.trim()).filter((s) => s.length > 0);
+  return out.length === 3 ? out : null;
+}
+
 /** Pull human text from ancillary bytes (JSON question/title/outcomes or plain UTF-8 snippet). */
 export function summarizeAncillaryData(ancillaryHex: string | null | undefined): AncillarySummary {
   if (!ancillaryHex || ancillaryHex === "0x") return { line: null, outcomes: null };
   const utf8 = utf8HexToReadable(ancillaryHex);
   if (!utf8) return { line: null, outcomes: null };
+
+  const managedTitle = extractPolymarketManagedOoTitle(utf8);
+  if (managedTitle) {
+    const managedOutcomes = parsePolymarketManagedOoOutcomes(utf8);
+    return { line: managedTitle, outcomes: managedOutcomes };
+  }
+
   try {
     const j = JSON.parse(utf8) as Record<string, unknown>;
     const title =
@@ -117,6 +165,41 @@ export function formatDuration(sec: number): string {
   const m = Math.floor((sec % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+/** Live countdown with seconds (locale-neutral numeric parts). */
+export function formatDurationClock(sec: number): string {
+  const s0 = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s0 / 3600);
+  const m = Math.floor((s0 % 3600) / 60);
+  const s = s0 % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+const EN = "en-US" as const;
+
+export function formatEnDateTime(ms: number, opts?: Intl.DateTimeFormatOptions): string {
+  return new Date(ms).toLocaleString(EN, opts ?? { dateStyle: "medium", timeStyle: "medium" });
+}
+
+/** Human-readable English title for an indexed dispute (Polymarket title or ancillary JSON question). */
+export function disputeEnglishTitle(d: Dispute): string {
+  const pm = d.polymarket?.title?.trim();
+  if (pm) return pm;
+  const anc = summarizeAncillaryData(d.ancillaryData);
+  if (anc.line) return anc.line;
+  return disputeTitle(d);
+}
+
+/** English-friendly title for an active VotingV2 row (ancillary JSON preferred over raw identifier). */
+export function voteRequestEnglishTitle(r: VoteReq): string {
+  const pm = r.polymarketTitle?.trim();
+  if (pm) return pm;
+  const anc = summarizeAncillaryData(r.ancillaryData);
+  if (anc.line) return anc.line;
+  return decodeDvmIdentifierLabel(r.identifierId);
 }
 
 export function disputeTitle(d: {

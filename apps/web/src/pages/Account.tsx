@@ -3,6 +3,7 @@ import OODisputesTeaser from "../components/OODisputesTeaser";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { apiPost, getInitData, getTelegramChat } from "../api";
 import VaultCustodialPanel from "../components/VaultCustodialPanel";
+import PolymarketWalletBanner from "../components/PolymarketWalletBanner";
 import { useSession } from "../session";
 
 const botUser = import.meta.env.VITE_PUBLIC_BOT_USERNAME ?? "YOUR_BOT";
@@ -111,6 +112,7 @@ export default function Account() {
             <button type="button" className="btn btn-secondary" onClick={() => disconnect()}>
               Disconnect
             </button>
+            <PolymarketWalletBanner />
           </>
         )}
       </div>

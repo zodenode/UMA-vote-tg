@@ -97,11 +97,14 @@ Paste the first into **both** API and bot as `INTERNAL_API_SECRET`. Paste the se
 | Variable | Required | Notes |
 | -------- | -------- | ----- |
 | `BOT_TOKEN` | Yes | Same bot as API. |
-| `WEB_APP_URL` | Yes | HTTPS URL of the **web** service (Mini App). |
+| `WEB_APP_URL` | Yes | **HTTPS** URL of the **web** service (Mini App). `http://` or malformed values cause Telegram to reject **Web App** keyboard buttons and break `/start` until fixed. |
 | `API_PUBLIC_URL` | Yes | Same as API service. |
 | `INTERNAL_API_SECRET` | Yes | Same as API. |
 | `CRON_SECRET` | Yes | Same as API. |
 | `PUBLIC_BOT_USERNAME` | Optional | Bot username without `@`; referral links in Mini App. |
+| `WELCOME_PHOTO_URL` / `WELCOME_PHOTO_FILE_ID` | Optional | Richer `/start` with photo + caption. |
+| `HOW_IT_WORKS_PHOTO_URL` / `HOW_IT_WORKS_PHOTO_FILE_ID` | Optional | Diagram for **📖 How it works** / `/how` (same rules as welcome photo). |
+| `BOT_INLINE_SHARE` | Optional | Set `1` only after **Inline mode** in @BotFather; adds share rows to menus. |
 | `DIGEST_INTERVAL_MS` | Optional | Default e.g. `3600000` (1h) — see bot code / `.env.example`. |
 | `DISPUTE_ALERT_INTERVAL_MS` | Optional | Default e.g. `45000` for dispute batch checks. |
 
